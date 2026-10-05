@@ -94,6 +94,26 @@ static int mcpx_apu_mixdown_all(void)
     return on;
 }
 
+/* Stereo downmix gains per mixbin (DSMIXBIN layout). Even/odd alone put
+ * the centre channel on the left and the LFE on the right: NFSU2's EA mixer
+ * writes engine and speech to its C/LFE voice (v0F5, bins 2/3), which was
+ * then heard only on the left. Centre, LFE and the mono I3DL2 send go to
+ * both sides at -3 dB; the other bins keep their even-left/odd-right pairing
+ * (FX sends 11..31 have no fixed position). */
+#define DM_M3DB 0.70710678f
+static float s_downmix[NUM_MIXBINS][2];
+
+static void downmix_init(void)
+{
+    for (int b = 0; b < NUM_MIXBINS; ++b) {
+        s_downmix[b][0] = (b & 1) ? 0.0f : 1.0f;
+        s_downmix[b][1] = (b & 1) ? 1.0f : 0.0f;
+    }
+    s_downmix[2][0] = s_downmix[2][1] = DM_M3DB;    /* front centre */
+    s_downmix[3][0] = s_downmix[3][1] = DM_M3DB;    /* LFE */
+    s_downmix[10][0] = s_downmix[10][1] = DM_M3DB;  /* I3DL2 reverb send */
+}
+
 static void dsp_ack_frame(MCPXAPUState *d)
 {
     int i;
@@ -127,6 +147,7 @@ void mcpx_apu_dsp_init(MCPXAPUState *d)
 
     d->gp.realtime = false;
     d->ep.realtime = false;
+    downmix_init();
 
     fprintf(stderr, "[APU] DSP GP/EP initialized (STUBBED - passthrough mode)\n");
 }
@@ -186,15 +207,16 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
              *
              * Even bins left, odd bins right, which preserves the stereo
              * pairing the guest set up -- bins 6/7 and 8/9 arrive with matched
-             * counts. This is not what a real EP does; it is the cheapest
+             * counts -- except centre, LFE and I3DL2, which go to both sides
+             * (s_downmix). This is not what a real EP does; it is the cheapest
              * mixdown that stops discarding audio. */
             float left, right;
             if (mcpx_apu_mixdown_all()) {
                 left = 0.0f;
                 right = 0.0f;
                 for (int b = 0; b < NUM_MIXBINS; ++b) {
-                    if (b & 1) right += mixbins[b][i];
-                    else       left  += mixbins[b][i];
+                    left  += s_downmix[b][0] * mixbins[b][i];
+                    right += s_downmix[b][1] * mixbins[b][i];
                 }
             } else {
                 left = mixbins[0][i];

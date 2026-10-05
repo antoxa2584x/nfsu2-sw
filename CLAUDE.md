@@ -172,6 +172,11 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   added that stale edge to screen row/column 1. NV2A snaps screen positions
   to 1/16 px by truncation (xemu roundScreenCoords): `nv2a_snap` in
   gl_vsh.c's nv2a_clip.
+  Came back with RECOMP_GL_SCALE > 1 (fixed 2026-10-05): the snap is in
+  title pixels, but real pixel 0's centre is at 0.5/k there, so the 0.5
+  edge still missed it. `u_surf.w` = 0.5 - 0.5*w/pw shifts positions so
+  each title pixel's first real centre sits on i + 0.5. A/B at 2x: real
+  row/column 1 mean 170 vs 30 without, flat with.
 - prof.bin sample times are 16 bits of 10 ms and wrap every 655 s;
   prof_report.py unwraps them (--time on long runs was empty before).
 - **Files:** no `open()` on directories (`XBOX_DIR_FD` sentinel); FAT can't
@@ -367,6 +372,10 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   filter as float32 plus its registers once a second; v0F4 = menu music.
   Still open: `cvtss2si` is lifted as a truncating cast (x86 rounds), 41
   sites -- not this bug, but wrong.
+- **Engine/speech only on the left (fixed 2026-10-03):** the stubbed-EP
+  mixdown (apu_dsp.c) sent even bins left, odd right, so the EA mixer's
+  C/LFE voice v0F5 (bins 2/3: engine, speech) was centre -> left only.
+  Centre, LFE and I3DL2 (bin 10) now go to both sides at -3 dB (`s_downmix`).
 - APU IRQ 5 was raised on Windows only (`#if _WIN32` in apu_core.c) -> no
   DirectSound voice ever started elsewhere.
 - NFSU2 mixes in software (EA engine, thread `sub_00274CA0`) into three 50 ms
@@ -434,9 +443,12 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 - Movies: ealogo, THX_LOGO, PSA, FMVOpening (trailer before Press Start);
   names logged by the sub_00129610 wrapper (`[movie] MOVIES\\...`). In 16:9
   src/movie_crop.c (via `nv2a_raw_batch_hook`, executor -> GL/VK) scales
-  FMVOpening's quad (clip +-1, vertex program, 0.675 of the width) by
-  1/0.675 so the letterboxed film fills the screen. NFSU2_MOVIE_CROP=0 off,
-  NFSU2_MOVIE_TRACE=1 logs movie draws.
+  the player's quad (clip x +-1, vertex program, 0.675 of the width) by
+  1/0.675 so every movie fills the screen (since 2026-10-05; before, only
+  FMVOpening). The disc has 28 MVhd streams (ZZDATA0-2); only FMVOpening is
+  letterboxed, the rest are full 4:3 and lose ~65 rows top/bottom (user's
+  choice: crop, not stretch). Quads not at x +-1 are left alone.
+  NFSU2_MOVIE_CROP=0 off, NFSU2_MOVIE_TRACE=1 logs movie draws.
 - (Before the FFmpeg decoder) movie decoding ran on the game thread: MMX IDCT `sub_0026EB34`, YUV->RGB
   `sub_0025ECB4`, `sub_0026FBB1` (Linux perf of the movies). The translator
   keeps registers of MMX *leaf* functions in shadowing C locals

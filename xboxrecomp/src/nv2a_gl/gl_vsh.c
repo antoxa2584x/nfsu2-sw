@@ -232,10 +232,15 @@ int nv2a_gl_vsh_program(const uint32_t (*prog)[4], uint32_t slots,
  * offset carries a +0.53125 bias, so a clip-space full-screen pass starts at
  * 0.53125 -- 0.5 on the hardware, which covers row and column 0; unsnapped,
  * GL left them out and NFSU2's glow buffer kept a stale edge that its
- * composite added back as a light line at the top and left. */
+ * composite added back as a light line at the top and left.
+ * Under a render scale k (RECOMP_GL_SCALE) a title pixel is k x k real
+ * pixels, and the first real centre of title pixel i sits at i + 0.5/k, not
+ * i + 0.5: an edge snapped to 0.5 still missed real row/column 0. u_surf.w =
+ * 0.5 - 0.5/k moves positions so that real centre lands on i + 0.5 (0 at
+ * k = 1). */
 #define NV2A_SNAP_GLSL \
     "vec2 nv2a_snap(vec2 sw, float w) {\n" \
-    "    return w > 0.0 ? trunc(sw / w * 16.0) / 16.0 * w : sw;\n" \
+    "    return w > 0.0 ? (trunc(sw / w * 16.0) / 16.0 - u_surf.w) * w : sw;\n" \
     "}\n"
 
 /* Everything around the program body: inputs, the register file, the ILU
@@ -329,7 +334,7 @@ const char *nv2a_gl_vsh_prelude(void)
         "layout(location = 14) in vec4 v14;\n"
         "layout(location = 15) in vec4 v15;\n"
         "uniform vec4 c[192];\n"
-        "uniform vec4 u_surf;      /* 2/W, 2/H (real pixels), 1/zmax, 0 */\n"
+        "uniform vec4 u_surf;      /* 2/W, 2/H, 1/zmax, scale offset */\n"
         "uniform vec2 u_aa;        /* logical -> real pixels */\n"
         "uniform vec4 u_m[4];      /* fixed-function composite rows */\n"
         "uniform vec4 u_vpoff;     /* fixed-function viewport offset */\n"

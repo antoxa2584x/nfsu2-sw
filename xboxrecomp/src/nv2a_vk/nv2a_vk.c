@@ -67,6 +67,9 @@ static int s_trace;
 static int s_vtrace;
 #define VT(...) do { if (s_vtrace > 0) { fprintf(stderr, "  [VKT] " __VA_ARGS__); fflush(stderr); } } while (0)
 static uint32_t s_frame;
+/* RECOMP_TEX_CHANGES=1: log every cached texture whose guest bytes changed
+ * (re-uploaded). Finds textures a title frees while still drawing them. */
+static int s_tex_changes = -1;
 static int s_drew_any;
 static const uint32_t *s_regs;
 static const Nv2aRawBatch *s_batch;
@@ -777,6 +780,13 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         t->used = t->checked = s_frame;
         return t->view;
     }
+    if (s_tex_changes < 0) {
+        const char *e = getenv("RECOMP_TEX_CHANGES");
+        s_tex_changes = e && atoi(e) > 0;
+    }
+    if (t && s_tex_changes)
+        fprintf(stderr, "[tex] frame %u: %08X format %02X %ux%u changed\n",
+                s_frame, va, color, w, h);
     if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
     if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
     if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
@@ -2551,7 +2561,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         vb->surf[0] = 2.0f / (float)s->w;
         vb->surf[1] = 2.0f / (float)s->h;
         vb->surf[2] = 1.0f / (float)zmax_of(r);
-        vb->surf[3] = 0.0f;
+        vb->surf[3] = 0.5f - 0.5f * (float)s->w / (float)s->pw; /* see nv2a_snap */
         memcpy(vb->m, b->composite, sizeof vb->m);
         memcpy(vb->vpoff, b->vp_offset, sizeof vb->vpoff);
         vb->aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
