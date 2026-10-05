@@ -18,6 +18,7 @@
 #include <switch.h>
 
 #include <fcntl.h>
+#include <malloc.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -251,6 +252,14 @@ static void perf_report(void)
     fprintf(stderr, "[perf] %.1f fps, textures %llu MB, %u shader programs, %s\n",
             (f - last_frames) / 10.0,
             (unsigned long long)(nv2a_gl_texture_bytes() >> 20), nv2a_gl_program_count(), vb);
+    {
+        /* A slow-down that builds up over a long session (2026-10-05:
+         * heavy stutter after ~30 min until the game is restarted) would
+         * show here as a heap that keeps growing. */
+        struct mallinfo mi = mallinfo();
+        fprintf(stderr, "[perf] heap %u MB in use, %u MB free in the arena\n",
+                (unsigned)(mi.uordblks >> 20), (unsigned)(mi.fordblks >> 20));
+    }
     /* 1500 frames/s is real time; below it, movies (clocked by DirectSound's
      * play cursor) run slow. */
     fprintf(stderr, "[perf] APU %d frames/s (1500 = real time), frame thread %.0f%% busy\n",
@@ -755,6 +764,7 @@ static void loader_start(void) { }
 #endif
 
 static int s_prof_all;          /* RECOMP_NX_PROFILE=2 */
+static u64 s_prof_after;        /* RECOMP_NX_PROFILE_AFTER=<s>: ticks since boot */
 
 /* ── Sampling profiler (RECOMP_NX_PROFILE=1) ──────────────────────────
  *
@@ -812,6 +822,10 @@ static void prof_thread(void *arg)
         u64 now;
         svcSleepThread(1000000ull);
         now = armGetSystemTick();
+        if (now - s_t0 < s_prof_after) {             /* RECOMP_NX_PROFILE_AFTER */
+            t_flush = now;
+            continue;
+        }
         if (now - t_list > freq / 10) {             /* who is busy */
             u64 span = now - t_list;
             uintptr_t entry;
@@ -887,6 +901,10 @@ static void prof_start(void)
     if (!e || (*e != '1' && *e != '2'))
         return;
     s_prof_all = *e == '2';
+    /* Sample only from <s> seconds after boot: a problem that starts late
+     * in a long session (the 1 kHz file grows ~1 MB per 10 s). */
+    if ((e = getenv("RECOMP_NX_PROFILE_AFTER")) && atoi(e) > 0)
+        s_prof_after = (u64)atoi(e) * armGetSystemTickFreq();
     /* 0x2A: above every game and host thread, so it runs on time. */
     if (R_FAILED(threadCreate(&t, prof_thread, NULL, NULL, 0x4000, 0x2A, -2))
         || R_FAILED(threadStart(&t))) {

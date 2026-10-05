@@ -322,6 +322,27 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   culprit: NV062 SET_OFFSET_SOURCE = 0x0308 = SET_CULL_FACE_ENABLE from a
   blit (not traced per method). The old swapped VK winding had hidden it.
   Only subchannel 0 goes into the shadow now.
+- **Instancing (2026-10-05, nv2a_vk.c, `RECOMP_VK_INSTANCE=0` off, `=2`
+  alternates per frame for A/B dumps):** ~25-30% of race draws repeat the
+  previous one with only the transform constants changed. The first is
+  recorded up to vkCmdDrawIndexed and held (`s_pend`); repeats append their
+  192 constants behind it in the ring (binding 6, `c[nv2a_ib + i]`,
+  nv2a_ib = gl_InstanceIndex * 192, up to 16); any other draw/clear/flip
+  issues it with the count. "Repeat" = no register change except the
+  upload windows/per-draw methods (executor dirty blocks), same program,
+  vertex pointers, indices, textures, and same `Nv2aRawBatch.vtx_epoch`
+  (bumped at semaphore releases, traps, inline batches). Drag start line on
+  lavapipe: 1790 -> 1250 draw calls, 21.2 -> 24.5 fps; A/B frames identical
+  but the timer digits; validation clean. `RECOMP_DRAW_STATS=1` logs
+  `[vk] per frame: draws -> draw calls`.
+- **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
+  `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
+  the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of
+  attribute 0 through the transform at 8 corners; vertex programs are
+  sliced to what oPos.xyw needs and typed (affine / linear-fractional), the
+  XDK form (dp4 rows + rcc + mul + mad) evaluated directly. Only ~5% of the
+  drag-line draws (the "half draw nothing" are occluded, not off screen);
+  ~0.4 us/draw on x86.
 - **Eden cannot run NVK** (2026-09-29): instance, device, swapchain (only
   IMMEDIATE; FIFO creation hangs) and command recording work, but no GPU
   submission ever completes -- vktest's first fence times out (also with

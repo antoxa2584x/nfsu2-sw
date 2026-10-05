@@ -55,6 +55,7 @@ static uint32_t f(const uint32_t *t, int dw, int pos, int bits)
 }
 
 static const char *const s_swz = "xyzw";
+extern int nv2a_shader_vk;
 
 /* Source A (0), B (1) or C (2) as a GLSL vec4 expression. */
 static void src(Out *o, const uint32_t *t, int which, int consts_local)
@@ -90,10 +91,12 @@ static void src(Out *o, const uint32_t *t, int which, int consts_local)
     } else if (mux == 3) {
         uint32_t ci = f(t, 1, 13, 8);
         const char *arr = consts_local ? "cl" : "c";
+        /* Vulkan: one 192-constant set per instance (nv2a_vk instancing). */
+        const char *base = nv2a_shader_vk && !consts_local ? "nv2a_ib + " : "";
         if (f(t, 3, 1, 1))
-            emit(o, "%s[clamp(%u + a0, 0, 191)].%s", arr, ci, comp);
+            emit(o, "%s[%sclamp(%u + a0, 0, 191)].%s", arr, base, ci, comp);
         else
-            emit(o, "%s[%u].%s", arr, ci < 192 ? ci : 191, comp);
+            emit(o, "%s[%s%u].%s", arr, base, ci < 192 ? ci : 191, comp);
     } else {
         emit(o, "vec4(0.0).%s", comp);
     }
@@ -145,7 +148,8 @@ int nv2a_gl_vsh_program(const uint32_t (*prog)[4], uint32_t slots,
     emit(&o, "void nv2a_program(void)\n{\n");
     emit(&o, "    int a0 = 0;\n");
     if (writes_consts)
-        emit(&o, "    vec4 cl[192];\n    for (int i = 0; i < 192; i++) cl[i] = c[i];\n");
+        emit(&o, "    vec4 cl[192];\n    for (int i = 0; i < 192; i++) cl[i] = c[%si];\n",
+             nv2a_shader_vk ? "nv2a_ib + " : "");
 
     for (pc = start; pc < slots; pc++) {
         const uint32_t *t = prog[pc];
@@ -268,13 +272,16 @@ static const char s_vk_prelude[] =
     "layout(location = 14) in vec4 v14;\n"
     "layout(location = 15) in vec4 v15;\n"
     "layout(std140, set = 0, binding = 0) uniform VsU {\n"
-    "    vec4 c[192];\n"
     "    vec4 u_surf;\n"
     "    vec4 u_m[4];\n"
     "    vec4 u_vpoff;\n"
     "    vec2 u_aa;\n"
     "    int u_xform;\n"
     "};\n"
+    /* Transform constants, 192 per instance: an instanced draw (nv2a_vk.c)
+     * repeats one mesh with each instance's own set. NV2A_VK_INSTANCES. */
+    "layout(std140, set = 0, binding = 6) uniform VsC { vec4 c[192 * 16]; };\n"
+    "int nv2a_ib;\n"
     "layout(location = 0) out vec4 vD0; layout(location = 1) out vec4 vD1;\n"
     "layout(location = 2) out vec4 vT0; layout(location = 3) out vec4 vT1;\n"
     "layout(location = 4) out vec4 vT2; layout(location = 5) out vec4 vT3;\n"
@@ -372,21 +379,26 @@ const char *nv2a_gl_vsh_prelude(void)
         "}\n";
 }
 
+#define NV2A_VSH_MAIN(set_ib) \
+    "void main() {\n" \
+    "    R0 = R1 = R2 = R3 = R4 = R5 = R6 = R7 = R8 = R9 = R10 = R11 = vec4(0.0);\n" \
+    "    oPos = o1 = o2 = oFog = oPts = vec4(0.0);\n" \
+    "    oD0 = oD1 = oB0 = oB1 = vec4(0.0, 0.0, 0.0, 1.0);\n" \
+    "    oT0 = oT1 = oT2 = oT3 = vec4(0.0, 0.0, 0.0, 1.0);\n" \
+    set_ib \
+    "    nv2a_program();\n" \
+    "    float w = abs(oPos.w) < 1e-6 ? 1e-6 : oPos.w;\n" \
+    "    vec3 s = vec3(oPos.xy * u_aa, oPos.z);\n" \
+    "    gl_Position = nv2a_clip(s * w, w);\n" \
+    "    vD0 = clamp(oD0, 0.0, 1.0); vD1 = clamp(oD1, 0.0, 1.0);\n" \
+    "    vT0 = oT0; vT1 = oT1; vT2 = oT2; vT3 = oT3; vFog = oFog.x;\n" \
+    "}\n"
+
 const char *nv2a_gl_vsh_main_program(void)
 {
-    return
-        "void main() {\n"
-        "    R0 = R1 = R2 = R3 = R4 = R5 = R6 = R7 = R8 = R9 = R10 = R11 = vec4(0.0);\n"
-        "    oPos = o1 = o2 = oFog = oPts = vec4(0.0);\n"
-        "    oD0 = oD1 = oB0 = oB1 = vec4(0.0, 0.0, 0.0, 1.0);\n"
-        "    oT0 = oT1 = oT2 = oT3 = vec4(0.0, 0.0, 0.0, 1.0);\n"
-        "    nv2a_program();\n"
-        "    float w = abs(oPos.w) < 1e-6 ? 1e-6 : oPos.w;\n"
-        "    vec3 s = vec3(oPos.xy * u_aa, oPos.z);\n"
-        "    gl_Position = nv2a_clip(s * w, w);\n"
-        "    vD0 = clamp(oD0, 0.0, 1.0); vD1 = clamp(oD1, 0.0, 1.0);\n"
-        "    vT0 = oT0; vT1 = oT1; vT2 = oT2; vT3 = oT3; vFog = oFog.x;\n"
-        "}\n";
+    if (nv2a_shader_vk)
+        return NV2A_VSH_MAIN("    nv2a_ib = gl_InstanceIndex * 192;\n");
+    return NV2A_VSH_MAIN("");
 }
 
 const char *nv2a_gl_vsh_fixed(void)

@@ -93,6 +93,7 @@ static VkQueue          s_queue;
 static uint32_t         s_qfam;
 static VkPhysicalDeviceMemoryProperties s_memprops;
 static VkDeviceSize     s_ubo_align = 256;
+static uint32_t         s_ubo_range = 16384;
 static VkFormat         s_depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
 static int              s_have_bc, s_have_depth_clamp;
 
@@ -1827,6 +1828,7 @@ static int ready(void)
     fprintf(stderr, "  [VK] %s, Vulkan %u.%u.%u\n", pp.deviceName, VK_API_VERSION_MAJOR(pp.apiVersion),
             VK_API_VERSION_MINOR(pp.apiVersion), VK_API_VERSION_PATCH(pp.apiVersion));
     s_ubo_align = pp.limits.minUniformBufferOffsetAlignment;
+    s_ubo_range = pp.limits.maxUniformBufferRange;
     {
         const char *e = getenv("RECOMP_GL_SCALE");
         double k = e ? strtod(e, NULL) : 1.0;
@@ -1931,20 +1933,21 @@ static int ready(void)
     }
 
     {
-        VkDescriptorSetLayoutBinding b[6];
+        VkDescriptorSetLayoutBinding b[7];
         VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         VkPipelineLayoutCreateInfo pli = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         VkPipelineCacheCreateInfo pci = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
         memset(b, 0, sizeof b);
-        for (i = 0; i < 6; i++) {
+        for (i = 0; i < 7; i++) {
             b[i].binding = i;
             b[i].descriptorCount = 1;
-            b[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
-                                        : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            b[i].stageFlags = i == 0 ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+            b[i].descriptorType = i < 2 || i == 6 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+                                                  : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            b[i].stageFlags = i == 0 || i == 6 ? VK_SHADER_STAGE_VERTEX_BIT
+                                               : VK_SHADER_STAGE_FRAGMENT_BIT;
         }
         lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
-        lci.bindingCount = 6;
+        lci.bindingCount = 7;
         lci.pBindings = b;
         if (vkCreateDescriptorSetLayout(s_dev, &lci, NULL, &s_dsl) != VK_SUCCESS)
             return 0;
@@ -2429,7 +2432,6 @@ static int upload_vertices(const Nv2aRawBatch *b)
 
 /* std140 blocks (gl_vsh.c / gl_psh.c, Vulkan dialect). */
 typedef struct {
-    float c[192][4];
     float surf[4];
     float m[16];
     float vpoff[4];
@@ -2448,6 +2450,190 @@ typedef struct {
     float pad[2];
 } FsBlock;
 
+/* ── Instancing ───────────────────────────────────────────────────────
+ *
+ * A quarter of a race frame's draws repeat the previous draw with only the
+ * transform constants changed (NFSU2's drag start line: ~480 of ~1870) --
+ * the same mesh at another matrix. Such a run becomes one instanced draw:
+ * the first draw is recorded up to its vkCmdDrawIndexed, which is held
+ * back (s_pend); every repeat only appends its 192 constants right behind
+ * the previous set in the ring (binding 6, which the vertex shader indexes
+ * by gl_InstanceIndex * 192); anything else -- another draw, a clear, a
+ * flip -- first issues the held draw with the instance count. Instances
+ * are drawn in order, so blending and depth come out as separate draws.
+ *
+ * "Repeat" means: no register changed since the held draw except the
+ * constant and program upload windows and the per-draw methods (executor
+ * dirty blocks, compared to a copy), the same program, vertex pointers,
+ * formats and count, the same indices, absent-attribute values and
+ * texture addresses, and no semaphore release or trap in between
+ * (vtx_epoch: vertex bytes the title could have rewritten). Only vertex
+ * programs (xform 2) whose attributes are all uploaded as stored.
+ * RECOMP_VK_INSTANCE=0 turns it off. */
+#define VK_INST_MAX   16                    /* gl_vsh.c: c[192 * 16] */
+#define VK_CONST_SIZE (192 * 16)
+
+extern uint8_t *nv2a_pb_reg_dirty(void);
+static uint32_t s_regs_seen[0x2000 / 4];    /* registers as of the last draw */
+
+/* Did a register a draw depends on change since the last draw? */
+static int regs_changed(const uint32_t *r)
+{
+    uint8_t *dirty = nv2a_pb_reg_dirty();
+    uint32_t blk, w;
+    int changed = 0;
+
+    for (blk = 0; blk < 0x2000 / 64; blk++) {
+        if (!dirty[blk])
+            continue;
+        dirty[blk] = 0;
+        if (blk >= 0xB00 / 64 && blk < 0xC00 / 64)
+            continue;                           /* program / constant uploads */
+        for (w = blk * 16; w < blk * 16 + 16; w++) {
+            uint32_t m = w * 4;
+            if (r[w] == s_regs_seen[w])
+                continue;
+            s_regs_seen[w] = r[w];
+            if (m == 0x0100 || m == 0x17FC || (m >= 0x1800 && m < 0x1820)
+             || m == 0x1D6C || m == 0x1D70 || m == 0x1E9C || m == 0x1EA4)
+                continue;                       /* NOP, BEGIN_END, draw data, semaphore, load slots */
+            changed = 1;
+        }
+    }
+    return changed;
+}
+
+static struct {
+    int          on;                        /* a draw is held */
+    uint32_t     n, count, max;             /* index count, instances so far, room */
+    VkDeviceSize cat;                       /* first instance's constants */
+    uint32_t     cb_gen;
+    uint32_t     prim, vertex_count, index_count;
+    uint16_t     attr_present, attr_direct;
+    uint32_t     vp_prog_gen, attr_const_gen, vtx_epoch, color_va, zeta_va;
+    uint32_t     tex_va[4], pal_va[4];
+    float        aa_sx, aa_sy;
+    Nv2aSurface  surface;
+    struct { const uint8_t *ptr; uint32_t type, size, stride; } direct[NV2A_RAW_ATTRS];
+    uint32_t    *idx;
+    size_t       idx_cap;
+} s_pend;
+static int s_inst_on = -1, s_inst_alt;
+static uint32_t s_st_draws, s_st_calls, s_st_inst;
+
+static void pend_flush(void)
+{
+    if (!s_pend.on)
+        return;
+    s_pend.on = 0;
+    if (s_pend.cb_gen != s_cb_gen)
+        return;                                 /* cannot happen: flushes go first */
+    vkCmdDrawIndexed(s_cb, s_pend.n, s_pend.count, 0, 0, 0);
+    s_st_calls++;
+}
+
+static int pend_matches(const Nv2aRawBatch *b)
+{
+    uint32_t a;
+    if (b->xform != 2 || b->prim != s_pend.prim || b->vertex_count != s_pend.vertex_count
+     || b->index_count != s_pend.index_count || b->attr_present != s_pend.attr_present
+     || b->attr_direct != s_pend.attr_direct || b->vp_prog_gen != s_pend.vp_prog_gen
+     || b->attr_const_gen != s_pend.attr_const_gen || b->vtx_epoch != s_pend.vtx_epoch
+     || b->color_va != s_pend.color_va || b->zeta_va != s_pend.zeta_va
+     || b->aa_sx != s_pend.aa_sx || b->aa_sy != s_pend.aa_sy
+     || memcmp(b->tex_va, s_pend.tex_va, sizeof s_pend.tex_va)
+     || memcmp(b->pal_va, s_pend.pal_va, sizeof s_pend.pal_va)
+     || memcmp(&b->surface, &s_pend.surface, sizeof s_pend.surface))
+        return 0;
+    for (a = 0; a < NV2A_RAW_ATTRS; a++)
+        if ((b->attr_direct & (1u << a))
+         && (b->direct[a].ptr != s_pend.direct[a].ptr || b->direct[a].type != s_pend.direct[a].type
+          || b->direct[a].size != s_pend.direct[a].size || b->direct[a].stride != s_pend.direct[a].stride))
+            return 0;
+    return !memcmp(b->indices, s_pend.idx, (size_t)b->index_count * 4);
+}
+
+/* Can b be held as the first instance of a run? */
+static int pend_eligible(const Nv2aRawBatch *b)
+{
+    uint32_t a;
+    if (!s_inst_on || b->xform != 2 || (b->attr_present & ~b->attr_direct))
+        return 0;
+    for (a = 0; a < NV2A_RAW_ATTRS; a++)
+        if ((b->attr_direct & (1u << a))
+         && vertex_format(b->direct[a].type, b->direct[a].size) == VK_FORMAT_UNDEFINED)
+            return 0;
+    return 1;
+}
+
+static void pend_hold(const Nv2aRawBatch *b, uint32_t n, VkDeviceSize cat, uint32_t max)
+{
+    uint32_t a;
+    s_pend.on = 1;
+    s_pend.n = n;
+    s_pend.count = 1;
+    s_pend.max = max;
+    s_pend.cat = cat;
+    s_pend.cb_gen = s_cb_gen;
+    s_pend.prim = b->prim;
+    s_pend.vertex_count = b->vertex_count;
+    s_pend.index_count = b->index_count;
+    s_pend.attr_present = b->attr_present;
+    s_pend.attr_direct = b->attr_direct;
+    s_pend.vp_prog_gen = b->vp_prog_gen;
+    s_pend.attr_const_gen = b->attr_const_gen;
+    s_pend.vtx_epoch = b->vtx_epoch;
+    s_pend.color_va = b->color_va;
+    s_pend.zeta_va = b->zeta_va;
+    s_pend.aa_sx = b->aa_sx;
+    s_pend.aa_sy = b->aa_sy;
+    s_pend.surface = b->surface;
+    memcpy(s_pend.tex_va, b->tex_va, sizeof s_pend.tex_va);
+    memcpy(s_pend.pal_va, b->pal_va, sizeof s_pend.pal_va);
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        s_pend.direct[a].ptr = b->direct[a].ptr;
+        s_pend.direct[a].type = b->direct[a].type;
+        s_pend.direct[a].size = b->direct[a].size;
+        s_pend.direct[a].stride = b->direct[a].stride;
+    }
+    if (b->index_count > s_pend.idx_cap) {
+        free(s_pend.idx);
+        s_pend.idx_cap = b->index_count + 1024;
+        s_pend.idx = (uint32_t *)malloc(s_pend.idx_cap * 4);
+        if (!s_pend.idx) {
+            s_pend.idx_cap = 0;
+            s_pend.on = 0;
+            vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
+            s_st_calls++;
+            return;
+        }
+    }
+    memcpy(s_pend.idx, b->indices, (size_t)b->index_count * 4);
+}
+
+/* One more instance of the held draw, when b is one; 0: draw it normally. */
+static int pend_append(const Nv2aRawBatch *b, int changed)
+{
+    VkDeviceSize at;
+    void *map;
+
+    if (!s_pend.on)
+        return 0;
+    if (changed || s_pend.count >= s_pend.max || s_pend.cb_gen != s_cb_gen || !pend_matches(b))
+        return 0;
+    at = (s_f->ring_off + s_ubo_align - 1) & ~(s_ubo_align - 1);
+    if (at != s_pend.cat + (VkDeviceSize)s_pend.count * VK_CONST_SIZE
+     || at + VK_CONST_SIZE > RING_BYTES)
+        return 0;
+    at = ring_alloc(VK_CONST_SIZE, s_ubo_align, &map);
+    if (!map)
+        return 0;
+    memcpy(map, b->vp_consts, VK_CONST_SIZE);
+    s_pend.count++;
+    s_st_inst++;
+    return 1;
+}
+
 static void vk_draw_raw(const Nv2aRawBatch *b)
 {
     VkSurf *s, *sampled[4];
@@ -2462,8 +2648,9 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     float tscale[4][2];
     PipeKey key;
     VkPipeline pipe;
-    VkDescriptorBufferInfo ub[2];
-    VkWriteDescriptorSet wr[6];
+    VkDescriptorBufferInfo ub[3];
+    VkWriteDescriptorSet wr[7];
+    uint32_t inst_room = 0;
     void *map;
     static VkPipeline cur_pipe;
     static uint32_t cur_pipe_gen;
@@ -2472,6 +2659,22 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         return;
     s_regs = r;
     s_batch = b;
+    if (s_inst_on < 0) {
+        const char *e = getenv("RECOMP_VK_INSTANCE");
+        s_inst_on = !(e && *e == '0') && s_ubo_range >= VK_CONST_SIZE
+                 && VK_CONST_SIZE % s_ubo_align == 0;
+        if (s_inst_on && e && *e == '2')
+            s_inst_alt = 1;                     /* debug: every other frame */
+        fprintf(stderr, "  [VK] instancing %s (uniform range %u, alignment %u)\n",
+                s_inst_on ? "on" : "off", s_ubo_range, (unsigned)s_ubo_align);
+    }
+    s_st_draws++;
+    {
+        int changed = regs_changed(r);
+        if (pend_append(b, changed))
+            return;
+    }
+    pend_flush();
     if (!prim_indices(b, &idx, &n, &topo, &cls) || !n)
         return;
     VT("draw: prim %u idx %u verts %u attrs %04X direct %04X xform %u surf %08X zeta %08X\n", b->prim, n,
@@ -2525,7 +2728,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     {
         /* Everything this draw puts in the ring, reserved now: a flush
          * later in the draw would reuse the ring under its own uniforms. */
-        VkDeviceSize need = 2 * 4096 + sizeof(VsBlock) + sizeof(FsBlock) + (VkDeviceSize)n * 4
+        VkDeviceSize need = 2 * 4096 + sizeof(VsBlock) + sizeof(FsBlock) + VK_CONST_SIZE + (VkDeviceSize)n * 4
                           + NV2A_RAW_ATTRS * 16 + 16 * 16;
         uint32_t a;
         for (a = 0; a < NV2A_RAW_ATTRS; a++)
@@ -2557,7 +2760,6 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
         VkDeviceSize vat = ring_alloc(sizeof(VsBlock), s_ubo_align, &map);
         vb = (VsBlock *)map;
         if (!vb) return;
-        memcpy(vb->c, b->vp_consts, sizeof vb->c);
         vb->surf[0] = 2.0f / (float)s->w;
         vb->surf[1] = 2.0f / (float)s->h;
         vb->surf[2] = 1.0f / (float)zmax_of(r);
@@ -2598,21 +2800,6 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
             ub[1].range = sizeof(FsBlock);
         }
     }
-    memset(wr, 0, sizeof wr);
-    for (i = 0; i < 6; i++) {
-        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wr[i].dstBinding = i;
-        wr[i].descriptorCount = 1;
-        if (i < 2) {
-            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            wr[i].pBufferInfo = &ub[i];
-        } else {
-            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            wr[i].pImageInfo = &img[i - 2];
-        }
-    }
-    p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, 6, wr);
-
     if (!upload_vertices(b))
         return;
     {
@@ -2632,8 +2819,44 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
             vkCmdBindIndexBuffer(s_cb, s_f->ring, iat, VK_INDEX_TYPE_UINT32);
         }
     }
+    {
+        /* Constants last: repeats append theirs right behind (pend_append). */
+        VkDeviceSize cat = ring_alloc(VK_CONST_SIZE, s_ubo_align, &map), range;
+        if (!map) return;
+        memcpy(map, b->vp_consts, VK_CONST_SIZE);
+        range = (VkDeviceSize)VK_CONST_SIZE * VK_INST_MAX;
+        if (range > s_ubo_range) range = s_ubo_range;
+        if (cat + range > RING_BYTES) range = RING_BYTES - cat;
+        range = range / VK_CONST_SIZE * VK_CONST_SIZE;
+        inst_room = (uint32_t)(range / VK_CONST_SIZE);
+        ub[2].buffer = s_f->ring;
+        ub[2].offset = cat;
+        ub[2].range = range;
+    }
+    memset(wr, 0, sizeof wr);
+    for (i = 0; i < 7; i++) {
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[i].dstBinding = i;
+        wr[i].descriptorCount = 1;
+        if (i < 2 || i == 6) {
+            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            wr[i].pBufferInfo = &ub[i == 6 ? 2 : i];
+        } else {
+            wr[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wr[i].pImageInfo = &img[i - 2];
+        }
+    }
+    p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_layout, 0, 7, wr);
+
     VT("  vkCmdDrawIndexed %u\n", n);
-    vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
+    /* The constants were the ring's last allocation, so a repeat's set
+     * lands right behind them (pend_append). */
+    if (pend_eligible(b) && inst_room > 1) {
+        pend_hold(b, n, ub[2].offset, inst_room);
+    } else {
+        vkCmdDrawIndexed(s_cb, n, 1, 0, 0, 0);
+        s_st_calls++;
+    }
     if (s_vtrace > 0)
         s_vtrace--;
 }
@@ -2649,6 +2872,7 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
 
     if (!ready())
         return;
+    pend_flush();
     s = target(sf, rs ? rs->zeta_va : 0, &d);
     if (!s)
         return;
@@ -2774,7 +2998,25 @@ static void vk_flip(void)
 
     if (!ready())
         return;
+    pend_flush();
     s_frame++;
+    if (s_inst_alt)
+        s_inst_on = s_frame & 1;
+    {
+        static int st = -1;
+        static uint32_t st_frame;
+        if (st < 0) {
+            const char *e = getenv("RECOMP_DRAW_STATS");
+            st = e && *e == '1';
+        }
+        if (st && s_frame - st_frame >= 300) {
+            fprintf(stderr, "[vk] per frame: %u draws -> %u draw calls (%u instances appended)\n",
+                    s_st_draws / (s_frame - st_frame), s_st_calls / (s_frame - st_frame),
+                    s_st_inst / (s_frame - st_frame));
+            s_st_draws = s_st_calls = s_st_inst = 0;
+            st_frame = s_frame;
+        }
+    }
     {
         static uint64_t last_ns, window_ns;
         static int lines;
@@ -2833,7 +3075,8 @@ static void vk_flip(void)
     end_rendering();
     s_rt = NULL;
     s_rt_depth = NULL;
-    if (s && s_drew_any && dump_every && (s_frame % (uint32_t)dump_every) == 0) {
+    if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
+                                          || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
         char path[320];
         snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
         dump_surface(s, path);
