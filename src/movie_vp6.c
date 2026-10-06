@@ -101,6 +101,33 @@ static AVCodecContext *slot_ctx(uint32_t handle)
     return s->ctx;
 }
 
+/* A flat near-white frame: every sample of the middle half (rows and
+ * columns, so letterbox bars do not count) has luma >= 200. FMVOpening
+ * cuts between its clips with 1-3 of them, a white flash on screen. */
+static int flat_white(const AVFrame *f)
+{
+    int x, y, w = f->width, h = f->height;
+
+    for (y = h / 4; y < h * 3 / 4; y += 8)
+        for (x = w / 4; x < w * 3 / 4; x += 8)
+            if (f->data[0][(ptrdiff_t)y * f->linesize[0] + x] < 200)
+                return 0;
+    return w > 0 && h > 0;
+}
+
+/* NFSU2_MOVIE_FLASH=1 keeps the white flash frames; by default they are
+ * shown as the movie's own black (luma 16). */
+static int flash_to_black(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("NFSU2_MOVIE_FLASH");
+        /* Not in the compare mode: the lifted decoder keeps them. */
+        on = !(e && *e == '1') && nfsu2_vp6_mode() != 2;
+    }
+    return on;
+}
+
 int nfsu2_vp6_decode(uint32_t handle, const uint8_t *data, int size,
                      uint8_t *y, uint8_t *u, uint8_t *v,
                      int y_stride, int uv_stride, int width, int height)
@@ -145,6 +172,18 @@ int nfsu2_vp6_decode(uint32_t handle, const uint8_t *data, int size,
      * FFmpeg returns it upright). */
     w = s_frame->width < width ? s_frame->width : width;
     h = s_frame->height < height ? s_frame->height : height;
+    if (flash_to_black() && flat_white(s_frame)) {
+        /* Into the title's buffers only: FFmpeg's own frame stays the
+         * reference for the next ones. */
+        for (row = 0; row < h; row++)
+            memset(y + (size_t)row * y_stride, 16, w);
+        for (row = 0; row < h / 2; row++) {
+            memset(u + (size_t)row * uv_stride, 128, w / 2);
+            memset(v + (size_t)row * uv_stride, 128, w / 2);
+        }
+        av_frame_unref(s_frame);
+        return 0;
+    }
     for (row = 0; row < h; row++)
         memcpy(y + (size_t)(height - 1 - row) * y_stride,
                s_frame->data[0] + (ptrdiff_t)row * s_frame->linesize[0], w);

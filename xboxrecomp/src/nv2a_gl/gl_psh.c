@@ -19,8 +19,8 @@
  * 15 EF_PROD. R0.a starts as T0.a.
  *
  * ponytail: the bump-map and dot-product texture modes (DOT_ST and friends)
- * sample as plain 2D, and cube maps read black; the dependent AR/GB lookups
- * are done. They are the
+ * sample as plain 2D, and cube maps read black on GL (Vulkan samples them);
+ * the dependent AR/GB lookups are done. They are the
  * next thing to add when a title's surfaces need them.
  */
 #include "gl_psh.h"
@@ -263,8 +263,14 @@ static void tex_fetch(Out *o, int t, uint32_t mode, const Nv2aPshKey *k)
         emit(o, "    if (any(lessThan(vT%d, vec4(0.0)))) discard;\n"
                 "    vec4 T%d = vec4(0.0);\n", t, t);
         break;
-    case 3:                                          /* CUBE_MAP: not yet */
-        emit(o, "    vec4 T%d = vec4(0.0);\n", t);
+    case 3:                                          /* CUBE_MAP */
+        /* Car reflections. The direction is (s, t, r), not divided by q
+         * (xemu does the same). Vulkan only: nv2a_vk binds cube views,
+         * nv2a_gl does not, so GL still reads black. */
+        if (nv2a_shader_vk)
+            emit(o, "    vec4 T%d = texture(t%d, vT%d.xyz);\n", t, t, t);
+        else
+            emit(o, "    vec4 T%d = vec4(0.0);\n", t);
         break;
     default: {                                       /* 2D (+ the rest, for now) */
         emit(o, "    vec2 tc%d = (abs(vT%d.w) > 1e-8 && %d == 1) ? vT%d.xy / vT%d.w : vT%d.xy;\n",
@@ -283,19 +289,21 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
 
     if (count > 8)
         count = 8;
-    if (nv2a_shader_vk)
+    if (nv2a_shader_vk) {
         /* Vulkan (nv2a_vk): std140 block at binding 1 -- vec2 array
-         * elements take 16 bytes -- and samplers at bindings 2..5. */
+         * elements take 16 bytes -- and samplers at bindings 2..5,
+         * samplerCube for a CUBE_MAP stage. */
         emit(&o,
             "#version 450\n"
             "layout(location = 0) in vec4 vD0; layout(location = 1) in vec4 vD1;\n"
             "layout(location = 2) in vec4 vT0; layout(location = 3) in vec4 vT1;\n"
             "layout(location = 4) in vec4 vT2; layout(location = 5) in vec4 vT3;\n"
-            "layout(location = 6) in float vFog;\n"
-            "layout(set = 0, binding = 2) uniform sampler2D t0;\n"
-            "layout(set = 0, binding = 3) uniform sampler2D t1;\n"
-            "layout(set = 0, binding = 4) uniform sampler2D t2;\n"
-            "layout(set = 0, binding = 5) uniform sampler2D t3;\n"
+            "layout(location = 6) in float vFog;\n");
+        for (i = 0; i < 4; i++)
+            emit(&o, "layout(set = 0, binding = %u) uniform %s t%u;\n", i + 2,
+                 ((k->shader_program >> (5 * i)) & 0x1F) == 3 ? "samplerCube" : "sampler2D",
+                 i);
+        emit(&o,
             "layout(std140, set = 0, binding = 1) uniform FsU {\n"
             "    vec2 u_tscale[4];\n"
             "    vec4 u_c0[8]; vec4 u_c1[8];\n"
@@ -305,7 +313,7 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
             "};\n"
             "layout(location = 0) out vec4 fragColor;\n"
             "void main() {\n");
-    else
+    } else
     emit(&o,
         "#version 330 core\n"
         "in vec4 vD0; in vec4 vD1; in vec4 vT0; in vec4 vT1;\n"

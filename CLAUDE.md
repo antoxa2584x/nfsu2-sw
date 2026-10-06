@@ -9,6 +9,10 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 
 ## Rules
 
+- **Renderer work goes into Vulkan only** (nv2a_vk.c, user's call
+  2026-10-06). Don't spend time on nv2a_gl: no new features or fixes there.
+  Shared shader code (gl_psh.c/gl_vsh.c) may get VK-only paths
+  (`nv2a_shader_vk`); keep the GL output unchanged.
 - Never commit game data (disc, `default.xbe`, `switch_sd/`) or generated C
   (`gen/`). Ask before committing or pushing anything.
 - The Switch build reads the **unpacked** disc at `sdmc:/switch/nfsu2x/game/`,
@@ -335,6 +339,16 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   lavapipe: 1790 -> 1250 draw calls, 21.2 -> 24.5 fps; A/B frames identical
   but the timer digits; validation clean. `RECOMP_DRAW_STATS=1` logs
   `[vk] per frame: draws -> draw calls`.
+- **Car reflections = cube maps (2026-10-06, Vulkan only):** car paint and
+  glass use texture mode 3 (CUBE_MAP) on stage 1 (shader program 0x01061),
+  which read black before. SET_TEXTURE_FORMAT bit 2 = cube; faces +X..-Z
+  follow each other, each with its mip chain, padded to 128 bytes. Menu:
+  static 256x256 cube from disc (0x812E7200). Races: a dynamic 128x128
+  cube (0x83095680) the title renders as six 128x128 surfaces (face stride
+  0x10000) every frame; nv2a_vk assembles it from those surfaces with
+  vkCmdBlitImage when a face's `VkSurf.gen` changed (`cube_from_surfaces`).
+  gl_psh.c emits samplerCube + texture(tN, vTN.xyz) only for VK; GL still
+  black. Lavapipe menu/race frames show reflections, validation clean.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of
@@ -470,6 +484,14 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   letterboxed, the rest are full 4:3 and lose ~65 rows top/bottom (user's
   choice: crop, not stretch). Quads not at x +-1 are left alone.
   NFSU2_MOVIE_CROP=0 off, NFSU2_MOVIE_TRACE=1 logs movie draws.
+- **White flashes in FMVOpening** (2026-10-06): the trailer cuts between
+  its clips with 1-3 flat white frames (luma ~235, in the VP6 data itself;
+  no white between the movies on Linux). movie_vp6.c shows a frame whose
+  middle half is all luma >= 200 as luma 16 (title's buffers only, FFmpeg's
+  reference untouched). `NFSU2_MOVIE_FLASH=1` keeps them; off in
+  NFSU2_NATIVE_VP6=2. `RECOMP_VK_CUBE=0` turns the car reflections off.
+- **Version** (CMakeLists.txt `NFSU2_SWITCH_VERSION`) is a plain variable
+  since 0.5: as a CACHE default the 0.4.5 NRO still said 0.4.3.
 - (Before the FFmpeg decoder) movie decoding ran on the game thread: MMX IDCT `sub_0026EB34`, YUV->RGB
   `sub_0025ECB4`, `sub_0026FBB1` (Linux perf of the movies). The translator
   keeps registers of MMX *leaf* functions in shadowing C locals
@@ -754,5 +776,5 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   slow (APU clock losing time + decoder cost); APU clock fixed and confirmed
   at 1500 frames/s, decoder speed-up awaiting a hardware test.
 - Audio plays on Linux (2026-09-29); Switch audio awaiting a test.
-- Open: cube maps, bump/dot-product texture modes (dependent AR/GB done),
+- Open: cube maps on GL (done on VK), bump/dot-product texture modes (dependent AR/GB done),
   fixed-function lighting, APU performance on Switch.

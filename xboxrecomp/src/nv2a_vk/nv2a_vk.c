@@ -262,6 +262,7 @@ typedef struct {
     uint32_t used;
     uint32_t aa_sx, aa_sy;
     int dirty;                 /* written since the last barrier */
+    uint32_t gen;              /* bumped by every draw and clear into it */
 } VkSurf;
 
 typedef struct {
@@ -399,14 +400,15 @@ static void image_to_general(VkImage img, VkImageAspectFlags aspect)
     b.image = img;
     b.subresourceRange.aspectMask = aspect;
     b.subresourceRange.levelCount = 1;
-    b.subresourceRange.layerCount = 1;
+    b.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
-static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage,
-                      VkImageAspectFlags aspect, VkImage *img, VkImageView *view,
-                      VkDeviceMemory *mem)
+/* layers: 1 = a 2D image, 6 = a cube map (cube view). */
+static int make_image_n(uint32_t w, uint32_t h, uint32_t layers, VkFormat fmt,
+                        VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                        VkImage *img, VkImageView *view, VkDeviceMemory *mem)
 {
     VkImageCreateInfo ci = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -418,7 +420,9 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
     ci.extent.height = h;
     ci.extent.depth = 1;
     ci.mipLevels = 1;
-    ci.arrayLayers = 1;
+    ci.arrayLayers = layers;
+    if (layers == 6)
+        ci.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     ci.samples = VK_SAMPLE_COUNT_1_BIT;
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
     ci.usage = usage;
@@ -434,11 +438,11 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
         return 0;
     }
     vi.image = *img;
-    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.viewType = layers == 6 ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D;
     vi.format = fmt;
     vi.subresourceRange.aspectMask = aspect & ~VK_IMAGE_ASPECT_STENCIL_BIT;
     vi.subresourceRange.levelCount = 1;
-    vi.subresourceRange.layerCount = 1;
+    vi.subresourceRange.layerCount = layers;
     if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
         vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
     if (vkCreateImageView(s_dev, &vi, NULL, view) != VK_SUCCESS) {
@@ -449,6 +453,13 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
     }
     image_to_general(*img, aspect);
     return 1;
+}
+
+static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage,
+                      VkImageAspectFlags aspect, VkImage *img, VkImageView *view,
+                      VkDeviceMemory *mem)
+{
+    return make_image_n(w, h, 1, fmt, usage, aspect, img, view, mem);
 }
 
 /* ── Surfaces ─────────────────────────────────────────────────────── */
@@ -465,7 +476,8 @@ static VkSurf *surf_find(uint32_t va)
 static void clear_image_color(VkImage img, float r, float g, float b, float a)
 {
     VkClearColorValue c = { { r, g, b, a } };
-    VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+                                   VK_REMAINING_ARRAY_LAYERS };
     end_rendering();
     vkCmdClearColorImage(s_cb, img, VK_IMAGE_LAYOUT_GENERAL, &c, 1, &rg);
 }
@@ -585,6 +597,7 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
 
 typedef struct {
     uint32_t va, color, w, h, pitch, hash, bytes;
+    uint32_t face;              /* cube map: bytes per face; 0 = 2D */
     VkImage image; VkImageView view; VkDeviceMemory mem;
     VkFormat fmt;
     uint32_t used, checked;
@@ -601,6 +614,10 @@ static uint32_t s_palette_reg, s_palette_va;
 static VkImage  s_dummy_img;
 static VkImageView s_dummy_view;
 static VkDeviceMemory s_dummy_mem;
+/* A transparent black cube, for a cube map stage with nothing to sample. */
+static VkImage  s_dummy_cube_img;
+static VkImageView s_dummy_cube_view;
+static VkDeviceMemory s_dummy_cube_mem;
 
 uint64_t nv2a_gl_texture_bytes(void) { return s_tex_bytes; }
 uint32_t nv2a_gl_frame_count(void) { return s_frame; }
@@ -733,7 +750,8 @@ static void tex_account(VkTex *t, uint32_t bytes)
 }
 
 /* Copy `bytes` at `src` (row length `row_texels`, 0 = tight) into the image. */
-static void tex_upload(VkTex *t, const void *src, uint32_t bytes, uint32_t row_texels)
+static void tex_upload(VkTex *t, const void *src, uint32_t bytes, uint32_t row_texels,
+                       uint32_t layer)
 {
     void *dst;
     VkDeviceSize at = ring_alloc(bytes, 16, &dst);
@@ -748,6 +766,7 @@ static void tex_upload(VkTex *t, const void *src, uint32_t bytes, uint32_t row_t
     rg.bufferOffset = at;
     rg.bufferRowLength = row_texels;
     rg.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    rg.imageSubresource.baseArrayLayer = layer;
     rg.imageSubresource.layerCount = 1;
     rg.imageExtent.width = t->w;
     rg.imageExtent.height = t->h;
@@ -755,17 +774,83 @@ static void tex_upload(VkTex *t, const void *src, uint32_t bytes, uint32_t row_t
     vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
 }
 
-static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t pitch)
+/* Cube map faces follow each other, each with its mip chain, padded to 128
+ * bytes (xemu's NV2A_CUBEMAP_FACE_ALIGNMENT); +X -X +Y -Y +Z -Z, the same
+ * order and texel orientation as Vulkan's cube layers. */
+static uint32_t cube_face_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t levels)
+{
+    uint32_t n = 0, l;
+
+    if (!levels)
+        levels = 1;
+    for (l = 0; l < levels; l++) {
+        n += tex_bytes(color, w, h, 0);
+        w = w > 1 ? w / 2 : 1;
+        h = h > 1 ? h / 2 : 1;
+    }
+    return (n + 127) & ~127u;
+}
+
+/* One 2D image (layer 0) or cube face from guest memory at va. */
+static void tex_fill(VkTex *t, uint32_t va, uint32_t layer)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    uint32_t color = t->color, w = t->w, h = t->h, pitch = t->pitch;
+    Nv2aTexture nt;
+
+    if (t->fmt != VK_FORMAT_B8G8R8A8_UNORM) {              /* DXT as it is */
+        tex_upload(t, mem + va, tex_bytes(color, w, h, 0), 0, layer);
+        return;
+    }
+    if (color == 0x12 && pitch && !(pitch & 3) && pitch / 4 >= w) {
+        /* Linear A8R8G8B8 (movie frames): the bytes are B8G8R8A8 already. */
+        tex_upload(t, mem + va, pitch * (h - 1) + w * 4, pitch / 4, layer);
+        return;
+    }
+    if ((size_t)w * h > s_decode_cap) {
+        free(s_decode);
+        s_decode_cap = (size_t)w * h;
+        s_decode = (uint32_t *)malloc(s_decode_cap * 4);
+    }
+    if (!s_decode)
+        return;
+    if (color == 0x06 || color == 0x07) {
+        const uint32_t *src = (const uint32_t *)(mem + va);
+        uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
+        for (y = 0; y < h; y++)
+            for (x = 0; x < w; x++)
+                s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
+    } else {
+        int ok;
+        memset(&nt, 0, sizeof nt);
+        nt.offset = va; nt.width = w; nt.height = h; nt.pitch = pitch; nt.color = color;
+        nt.addr_u = nt.addr_v = 1;
+        ok = color == 0x0B ? decode_indexed(va, w, h, s_decode)
+                           : nv2a_backend_decode_texture(&nt, s_decode);
+        if (!ok) {
+            uint32_t k;
+            for (k = 0; k < w * h; k++)
+                s_decode[k] = 0xFFFF00FFu;
+            if (s_trace)
+                LOGE("texture 0x%08X format 0x%02X not decodable\n", va, color);
+        }
+    }
+    tex_upload(t, s_decode, w * h * 4, 0, layer);
+}
+
+/* face: bytes per cube face (cube_face_bytes), 0 for a 2D texture. */
+static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, uint32_t pitch,
+                           uint32_t face)
 {
     VkTex *t = NULL, *victim = NULL;
     uint32_t i, hash;
     VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
-    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-    Nv2aTexture nt;
+    uint32_t layers = face ? 6 : 1, f, size;
 
     for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
         VkTex *c = &s_tex[i - 1];
-        if (c->image && c->va == va && c->color == color && c->w == w && c->h == h) {
+        if (c->image && c->va == va && c->color == color && c->w == w && c->h == h
+            && c->face == face) {
             t = c;
             break;
         }
@@ -774,7 +859,7 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         t->used = s_frame;
         return t->view;
     }
-    hash = bytes_hash(va, tex_bytes(color, w, h, pitch));
+    hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
     if (color == 0x0B)
         hash ^= bytes_hash(s_palette_va, 1024) * 31u;
     if (t && t->hash == hash) {
@@ -805,62 +890,109 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h, 
         if (t->image)
             tex_free(t);
         t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
-        VT("texture %08X fmt %02X %ux%u pitch %u\n", va, color, w, h, pitch);
-    if (!make_image(w, h, fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT, &t->image, &t->view, &t->mem)) {
+        t->face = face;
+        VT("texture %08X fmt %02X %ux%u pitch %u%s\n", va, color, w, h, pitch,
+           face ? " cube" : "");
+        if (!make_image_n(w, h, layers, fmt,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                          VK_IMAGE_ASPECT_COLOR_BIT, &t->image, &t->view, &t->mem)) {
             memset(t, 0, sizeof *t);
-            return s_dummy_view;
+            return face ? s_dummy_cube_view : s_dummy_view;
         }
         tex_index_add(t);
         if (s_trace)
-            LOGE("texture 0x%08X format 0x%02X %ux%u pitch %u\n", va, color, w, h, pitch);
+            LOGE("texture 0x%08X format 0x%02X %ux%u pitch %u%s\n", va, color, w, h, pitch,
+                 face ? " cube" : "");
     }
     t->hash = hash;
     t->used = t->checked = s_frame;
 
-    if (fmt != VK_FORMAT_B8G8R8A8_UNORM) {                 /* DXT as it is */
-        uint32_t size = tex_bytes(color, w, h, 0);
-        tex_upload(t, mem + va, size, 0);
-        tex_account(t, size);
-        return t->view;
-    }
-    if (color == 0x12 && pitch && !(pitch & 3) && pitch / 4 >= w) {
-        /* Linear A8R8G8B8 (movie frames): the bytes are B8G8R8A8 already. */
-        tex_upload(t, mem + va, pitch * (h - 1) + w * 4, pitch / 4);
-        tex_account(t, w * h * 4);
-        return t->view;
-    }
-    if ((size_t)w * h > s_decode_cap) {
-        free(s_decode);
-        s_decode_cap = (size_t)w * h;
-        s_decode = (uint32_t *)malloc(s_decode_cap * 4);
-    }
-    if (!s_decode)
-        return s_dummy_view;
-    if (color == 0x06 || color == 0x07) {
-        const uint32_t *src = (const uint32_t *)(mem + va);
-        uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
-        for (y = 0; y < h; y++)
-            for (x = 0; x < w; x++)
-                s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
-    } else {
-        int ok;
-        memset(&nt, 0, sizeof nt);
-        nt.offset = va; nt.width = w; nt.height = h; nt.pitch = pitch; nt.color = color;
-        nt.addr_u = nt.addr_v = 1;
-        ok = color == 0x0B ? decode_indexed(va, w, h, s_decode)
-                           : nv2a_backend_decode_texture(&nt, s_decode);
-        if (!ok) {
-            uint32_t k;
-            for (k = 0; k < w * h; k++)
-                s_decode[k] = 0xFFFF00FFu;
-            if (s_trace)
-                LOGE("texture 0x%08X format 0x%02X not decodable\n", va, color);
-        }
-    }
-    tex_upload(t, s_decode, w * h * 4, 0);
-    tex_account(t, w * h * 4);
+    for (f = 0; f < layers; f++)
+        tex_fill(t, va + f * face, f);
+    size = fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : w * h * 4;
+    tex_account(t, size * layers);
     return t->view;
+}
+
+/* A cube map whose faces the title renders (race car reflections: six
+ * 128x128 targets, one per face, every frame). The faces exist only as
+ * surface images, so the cube is assembled from them on the GPU, again
+ * whenever a face was drawn into since the last copy. */
+typedef struct {
+    uint32_t va, w, h, face, size;
+    VkImage image; VkImageView view; VkDeviceMemory mem;
+    VkSurf  *src[6];
+    uint32_t gen[6];
+    uint32_t used;
+} VkCube;
+#define VK_MAX_CUBE 4
+static VkCube s_cube[VK_MAX_CUBE];
+
+static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint32_t face,
+                                      VkSurf *faces[6])
+{
+    VkCube *c = NULL;
+    uint32_t f, size = 0;
+    int i, copied = 0;
+
+    for (f = 0; f < 6; f++)
+        if (faces[f] && to_stored(w, faces[f]->pw, faces[f]->w) > size)
+            size = to_stored(w, faces[f]->pw, faces[f]->w);
+    for (i = 0; i < VK_MAX_CUBE; i++)
+        if (s_cube[i].image && s_cube[i].va == va && s_cube[i].w == w && s_cube[i].h == h
+            && s_cube[i].face == face && s_cube[i].size == size) {
+            c = &s_cube[i];
+            break;
+        }
+    if (!c) {
+        for (i = 0; i < VK_MAX_CUBE; i++)
+            if (!c || !s_cube[i].image || (c->image && s_cube[i].used < c->used))
+                c = &s_cube[i];
+        if (c->image)
+            garbage_add(c->image, c->view, c->mem);
+        memset(c, 0, sizeof *c);
+        if (!make_image_n(size, size, 6, VK_FORMAT_B8G8R8A8_UNORM,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                          VK_IMAGE_ASPECT_COLOR_BIT, &c->image, &c->view, &c->mem)) {
+            memset(c, 0, sizeof *c);
+            return s_dummy_cube_view;
+        }
+        clear_image_color(c->image, 0, 0, 0, 0);
+        c->va = va; c->w = w; c->h = h; c->face = face; c->size = size;
+        if (s_trace)
+            LOGE("cube 0x%08X %ux%u from surfaces (stored %u)\n", va, w, h, size);
+    }
+    c->used = s_frame;
+    for (f = 0; f < 6; f++) {
+        VkSurf *sf = faces[f];
+        VkImageBlit bl;
+        if (!sf || (c->src[f] == sf && c->gen[f] == sf->gen))
+            continue;
+        if (!copied) {
+            end_rendering();
+            barrier_all();
+            copied = 1;
+        }
+        memset(&bl, 0, sizeof bl);
+        bl.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bl.srcSubresource.layerCount = 1;
+        bl.srcOffsets[1].x = (int32_t)to_stored(w, sf->pw, sf->w);
+        bl.srcOffsets[1].y = (int32_t)to_stored(h, sf->ph, sf->h);
+        bl.srcOffsets[1].z = 1;
+        bl.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bl.dstSubresource.baseArrayLayer = f;
+        bl.dstSubresource.layerCount = 1;
+        bl.dstOffsets[1].x = (int32_t)size;
+        bl.dstOffsets[1].y = (int32_t)size;
+        bl.dstOffsets[1].z = 1;
+        vkCmdBlitImage(s_cb, sf->image, VK_IMAGE_LAYOUT_GENERAL, c->image,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        c->src[f] = sf;
+        c->gen[f] = sf->gen;
+    }
+    if (copied)
+        barrier_all();
+    return c->view;
 }
 
 /* Samplers: wrap u, wrap v, mag, min. */
@@ -921,6 +1053,16 @@ static void rt_scale(uint32_t w, uint32_t h, uint32_t sw, uint32_t sh,
 static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptorImageInfo *out,
                        VkSurf **sampled)
 {
+    /* Texture mode CUBE_MAP: the shader declares a samplerCube (gl_psh.c),
+     * so the descriptor must be a cube view whatever is bound. */
+    int cube = ((regs[0x1E70 / 4] >> (5 * i)) & 0x1F) == 3;
+    /* RECOMP_VK_CUBE=0: cube stages sample the black dummy (no car
+     * reflections, the old look). */
+    static int cube_on = -1;
+    if (cube_on < 0) {
+        const char *e = getenv("RECOMP_VK_CUBE");
+        cube_on = !(e && *e == '0');
+    }
     uint32_t base = (0x1B00u + (uint32_t)i * 0x40u) / 4;
     uint32_t control0 = regs[base + 3];
     uint32_t format = regs[base + 1];
@@ -929,7 +1071,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
     VkSurf *rt;
 
     scale[0] = scale[1] = 1.0f;
-    out->imageView = s_dummy_view;
+    out->imageView = cube ? s_dummy_cube_view : s_dummy_view;
     out->imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     out->sampler = sampler_get(0);
     *sampled = NULL;
@@ -951,15 +1093,33 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
         return;
     s_palette_reg = regs[base + 8];
     s_palette_va = s_batch->pal_va[i];
-    rt = surf_find(va);
-    if (rt) {
+    rt = cube ? NULL : surf_find(va);
+    if (cube) {
+        /* SET_TEXTURE_FORMAT bit 2: CUBEMAP_ENABLE; mip levels in [19:16]. */
+        if (cube_on && (format & 4)) {
+            uint32_t face = cube_face_bytes(color, w, h, (format >> 16) & 0xF), f;
+            VkSurf *faces[6];
+            int any = 0;
+            for (f = 0; f < 6; f++)
+                any |= (faces[f] = surf_find(va + f * face)) != NULL;
+            if (any) {
+                out->imageView = cube_from_surfaces(va, w, h, face, faces);
+            } else {
+                uint32_t texs = s_hz_texs;
+                uint64_t t0 = hz_now();
+                out->imageView = tex_get(va, color, w, h, 0, face);
+                if (s_hz_texs != texs)
+                    s_hz_tex_ns += hz_now() - t0;
+            }
+        }
+    } else if (rt) {
         out->imageView = rt->view;
         *sampled = rt;
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
     } else {
         uint32_t texs = s_hz_texs;
         uint64_t t0 = hz_now();
-        out->imageView = tex_get(va, color, w, h, pitch);
+        out->imageView = tex_get(va, color, w, h, pitch, 0);
         if (s_hz_texs != texs)
             s_hz_tex_ns += hz_now() - t0;
     }
@@ -2010,6 +2170,12 @@ static int ready(void)
                     VK_IMAGE_ASPECT_COLOR_BIT, &s_dummy_img, &s_dummy_view, &s_dummy_mem))
         return 0;
     clear_image_color(s_dummy_img, 0, 0, 0, 0);
+    if (!make_image_n(1, 1, 6, VK_FORMAT_B8G8R8A8_UNORM,
+                      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT, &s_dummy_cube_img, &s_dummy_cube_view,
+                      &s_dummy_cube_mem))
+        return 0;
+    clear_image_color(s_dummy_cube_img, 0, 0, 0, 0);
     s_state = 1;
     fprintf(stderr, "  [VK] ready%s: BC %s, depth %s, depth clamp %s, UBO align %u\n",
             s_headless ? " (headless)" : "", s_have_bc ? "yes" : "no",
@@ -2745,6 +2911,7 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     }
     begin_rendering(s, d);
     s->dirty = 1;
+    s->gen++;
     if (pipe != cur_pipe || cur_pipe_gen != s_cb_gen) {
         vkCmdBindPipeline(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
         cur_pipe = pipe;
@@ -2926,6 +3093,7 @@ static void vk_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
     vkCmdClearAttachments(s_cb, nca, ca, 1, &rect);
     VT("  cleared\n");
     s->dirty = 1;
+    s->gen++;
 }
 
 static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t h)

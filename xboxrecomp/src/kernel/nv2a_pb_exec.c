@@ -4357,6 +4357,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                         fprintf(stderr, "  [PB] FLIP_STALL: no flip retired in 250 ms "
                                 "(read %u write %u), going on\n",
                                 s_gpu.flip_read, s_gpu.flip_write);
+                    /* Taken as a lost sync: the read index one off the
+                     * driver's stays off (with two buffers, one ahead is one
+                     * behind), and every later stall timed out too -- 3.7 fps
+                     * for good on a Carbon console run. Stepping it puts it
+                     * back; a retire that was only late costs one more
+                     * timeout. */
+                    s_gpu.flip_read = s_gpu.flip_modulo
+                                    ? (s_gpu.flip_read + 1) % s_gpu.flip_modulo
+                                    : s_gpu.flip_read + 1;
                     break;
                 }
                 WaitForSingleObject(driver_event(), 1);

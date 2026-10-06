@@ -376,8 +376,12 @@ extern void sub_002F1D80_gen(void);
 void sub_002F1D80(void)
 {
     uint32_t blk = ecx;
-    uint32_t head = MEM32(blk + 0x1BC);
+    /* Read only once at DISPATCH: read before, a retire by the other
+     * handler (DPC thread vs a D3D busy-wait) in between was counted by
+     * both, the executor's flip index ran one off for good, and every
+     * FLIP_STALL then waited out its 250 ms (Carbon, console, 3.7 fps). */
     uint8_t old = d3d_isr_enter();
+    uint32_t head = MEM32(blk + 0x1BC);
 
     xbox_Nv2aVblankTaken();
     sub_002F1D80_gen();
@@ -406,8 +410,8 @@ void sub_002F22F0(void)
 {
     volatile uint32_t *nv = (volatile uint32_t *)XBOX_PTR(0xFD000000u);
     uint32_t blk = ecx;
-    uint32_t head = MEM32(blk + 0x1BC);
     uint8_t old = d3d_isr_enter();
+    uint32_t head = MEM32(blk + 0x1BC);     /* at DISPATCH, as above */
     uint32_t nsource;
 
     nv2a_pb_trap_lock();
