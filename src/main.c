@@ -8,7 +8,9 @@
  *
  * Game data is the extracted disc (default.xbe, NFSUNDER/, B3/). Where it is
  * looked for:
- *   Windows/Linux: $NFSU2_GAME_DIR, else ./game
+ *   Windows/Linux: $NFSU2_GAME_DIR, else a gamedata/ directory next to the
+ *                   executable, else gamedata/ in the working directory,
+ *                   else ./game
  *   Switch:        sdmc:/switch/nfsu2x/game
  */
 
@@ -18,6 +20,9 @@
 #else
 #  include <signal.h>
 #  include <unistd.h>
+#endif
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#  include <mach-o/dyld.h>          /* _NSGetExecutablePath */
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -202,6 +207,79 @@ static void install_crash_reporter(void)
 
 /* ------------------------------------------------------------------ */
 
+#if !defined(__SWITCH__)
+/* A directory is the game data if it holds default.xbe. fopen rather than
+ * access(): that answer is the same on Windows and on sdmc. */
+static int has_game(const char *dir)
+{
+    char path[4200];
+    FILE *f;
+
+    if (snprintf(path, sizeof path, "%s/default.xbe", dir) >= (int)sizeof path)
+        return 0;
+    f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+/* Where the game data is, without NFSU2_GAME_DIR: a gamedata/ directory
+ * next to the executable first (so a build can be shipped with the disc
+ * beside it and nothing configured), then gamedata/ in the working
+ * directory, then the usual ./game. $NFSU2_GAME_DIR always wins. */
+static const char *resolve_game_dir(char *buf, size_t cap)
+{
+    const char *env = getenv("NFSU2_GAME_DIR");
+    char exe[4096], dir[4096];
+    size_t i, len;
+
+    if (env && env[0])
+        return env;
+
+    exe[0] = 0;
+#if defined(_WIN32)
+    {
+        DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
+        if (!n || n >= sizeof exe)
+            exe[0] = 0;
+    }
+#elif defined(__APPLE__)
+    {
+        uint32_t sz = (uint32_t)sizeof exe;
+        if (_NSGetExecutablePath(exe, &sz) != 0)
+            exe[0] = 0;
+    }
+#elif defined(__linux__)
+    {
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (n > 0)
+            exe[n] = 0;
+        else
+            exe[0] = 0;
+    }
+#endif
+    /* The executable's directory, up to the last separator. */
+    len = strlen(exe);
+    for (i = len; i > 0; i--)
+        if (exe[i - 1] == '/' || exe[i - 1] == '\\')
+            break;
+    if (i > 0 && i < sizeof dir) {
+        memcpy(dir, exe, i);
+        dir[i] = 0;
+        if (i > 0 && (dir[i - 1] == '/' || dir[i - 1] == '\\'))
+            dir[--i] = 0;               /* "build/" -> "build", "/" -> "" */
+        if (snprintf(buf, cap, "%s/gamedata", dir) < (int)cap && has_game(buf))
+            return buf;
+    }
+    if (has_game("gamedata")) {
+        snprintf(buf, cap, "gamedata");
+        return buf;
+    }
+    return NFSU2_DEFAULT_GAME_DIR;
+}
+#endif
+
 static void *load_file(const char *path, size_t *out_size)
 {
     FILE *f = fopen(path, "rb");
@@ -384,15 +462,22 @@ static int game_main(void)
 #endif
 
     game_dir = getenv("NFSU2_GAME_DIR");
-    if (!game_dir || !game_dir[0])
+    if (!game_dir || !game_dir[0]) {
+#if !defined(__SWITCH__)
+        static char gamedir[4200];      /* kept: game_dir points into it */
+        game_dir = resolve_game_dir(gamedir, sizeof gamedir);
+#else
         game_dir = NFSU2_DEFAULT_GAME_DIR;
+#endif
+    }
     snprintf(xbe_path, sizeof(xbe_path), "%s/default.xbe", game_dir);
 
     xbe_data = load_file(xbe_path, &xbe_size);
     if (!xbe_data) {
         fprintf(stderr, "cannot read %s\n", xbe_path);
-        fatal("Failed to load default.xbe. Put the extracted disc in the game "
-              "directory (or set NFSU2_GAME_DIR).");
+        fatal("Failed to load default.xbe. Put the extracted disc in a "
+              "gamedata directory next to the executable (or in ./game), "
+              "or set NFSU2_GAME_DIR.");
         return 1;
     }
     printf("XBE %s: %zu bytes\n", xbe_path, xbe_size);
