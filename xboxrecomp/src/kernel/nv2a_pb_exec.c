@@ -29,6 +29,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 /* The swizzle decoder the D3D8 layer already uses -- one implementation of
@@ -431,6 +432,7 @@ uint8_t *nv2a_pb_reg_dirty(void) { return s_reg_dirty; }
 static float reg_f(uint32_t method) { float f; memcpy(&f, &s_reg[method / 4], 4); return f; }
 
 static uint32_t s_sem_va;
+static uint32_t s_vtx_epoch;            /* Nv2aRawBatch.vtx_epoch */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
 
 /* Slot + 1 of each method in s_unhandled: this runs millions of times a
@@ -2222,6 +2224,921 @@ uint32_t nv2a_pb_resolve(uint32_t dma_offset)
     return dma_resolve(dma_offset);
 }
 
+/* Off-screen batches (RECOMP_CULL=0 off, RECOMP_CULL_CHECK=1 verifies every
+ * rejection against all vertices, RECOMP_DRAW_STATS=1 logs counts).
+ *
+ * Titles cull coarsely: at NFSU2's drag start line ~2300 batches a frame are
+ * handed over and about half of them draw nothing, and every one costs the
+ * executor and the back end their per-draw work. A batch whose vertices all
+ * lie beyond one edge of the surface clip rectangle (draws are scissored to
+ * it) has no fragments, so it is dropped before the back end sees it.
+ *
+ * The test needs no per-vertex transform: the bounding box of attribute 0 is
+ * pushed through the transform at its 8 corners. That bounds every vertex
+ * when the screen position is a linear-fractional function of the position
+ * alone -- (a.p + b) / (d.p + e), monotone along every line -- with a
+ * denominator of one sign over the box: then each screen coordinate takes its
+ * extremes at corners. Fixed function is that by construction (composite
+ * matrix, divide by w). For a vertex program the instructions oPos.xyw
+ * depend on are sliced out once per program and typed: constant, affine in
+ * v0, affine * 1/(one affine value) -- the XDK tail's RCC of w -- or other;
+ * other in oPos.x/y/w, a program that writes constants, or an index register
+ * from vertex data makes the program ineligible. Corners also need w > 0
+ * (w is affine, so its minimum over the box is at a corner): behind the eye
+ * the screen position says nothing about visibility. */
+#define VPC_K  0                /* constant over the batch */
+#define VPC_A  1                /* affine in v0 */
+#define VPC_X  (-1)             /* anything else */
+/* >= 2: affine / (the RCP/RCC input at instruction t - 2) */
+
+typedef struct {
+    uint8_t mux, reg, neg, sw[4];
+} VpcSrc;
+
+typedef struct {
+    uint8_t mac, ilu, dst, mmask, ird, imask, omask, o_ilu, o_out, o_addr, final;
+    uint8_t vattr, cidx, rel;
+    uint8_t run_mac, run_ilu;   /* units the slice needs */
+    VpcSrc  s[3];
+} VpcIns;
+
+#define VPC_MAX 64              /* sliced instructions kept */
+typedef struct {
+    uint64_t hash;
+    uint32_t start;
+    int      ok;                /* eligible */
+    int      den;               /* slice index of the denominator, or -1 */
+    const char *why;            /* when not eligible */
+    int      tx, ty, tw;
+    /* Fast form (fast = 1): x = (c[row0].p * c[cs].x) * rcc(c[row3].p) + c[co].x,
+     * y likewise, w = c[row3].p -- the XDK's oPos = M v0 and its tail. */
+    int      fast, rcp, row[4], cs, co;
+    uint32_t n;
+    VpcIns   ins[VPC_MAX];
+} VpcProg;
+
+static void vpc_decode(const uint32_t *t, VpcIns *o)
+{
+    int k;
+    memset(o, 0, sizeof *o);
+    o->mac = (uint8_t)vpf(t, 1, 21, 4);
+    o->ilu = (uint8_t)vpf(t, 1, 25, 3);
+    o->dst = (uint8_t)vpf(t, 3, 20, 4);
+    o->mmask = (uint8_t)vpf(t, 3, 24, 4);
+    o->ird = o->mac ? 1 : o->dst;
+    o->imask = (uint8_t)vpf(t, 3, 16, 4);
+    o->omask = (uint8_t)vpf(t, 3, 12, 4);
+    o->o_ilu = (uint8_t)vpf(t, 3, 2, 1);
+    o->o_out = (uint8_t)vpf(t, 3, 11, 1);
+    o->o_addr = (uint8_t)vpf(t, 3, 3, 8);
+    o->final = (uint8_t)vpf(t, 3, 0, 1);
+    o->vattr = (uint8_t)vpf(t, 1, 9, 4);
+    o->cidx = (uint8_t)vpf(t, 1, 13, 8);
+    o->rel = (uint8_t)vpf(t, 3, 1, 1);
+    for (k = 0; k < 3; k++) {
+        uint32_t mux, reg, neg, sw;
+        switch (k) {
+        case 0:  mux = vpf(t, 2, 26, 2); reg = vpf(t, 2, 28, 4);
+                 neg = vpf(t, 1, 8, 1);  sw = vpf(t, 1, 0, 8);  break;
+        case 1:  mux = vpf(t, 2, 11, 2); reg = vpf(t, 2, 13, 4);
+                 neg = vpf(t, 2, 25, 1); sw = vpf(t, 2, 17, 8); break;
+        default: mux = vpf(t, 3, 28, 2);
+                 reg = (vpf(t, 2, 0, 2) << 2) | vpf(t, 3, 30, 2);
+                 neg = vpf(t, 2, 10, 1); sw = vpf(t, 2, 2, 8);  break;
+        }
+        o->s[k].mux = (uint8_t)mux; o->s[k].reg = (uint8_t)reg; o->s[k].neg = (uint8_t)neg;
+        o->s[k].sw[0] = (uint8_t)((sw >> 6) & 3); o->s[k].sw[1] = (uint8_t)((sw >> 4) & 3);
+        o->s[k].sw[2] = (uint8_t)((sw >> 2) & 3); o->s[k].sw[3] = (uint8_t)(sw & 3);
+    }
+}
+
+/* Register components written (bit 4 * reg + comp, comp 0 = x); mask bit 3
+ * is x. r[12] is oPos. */
+static uint64_t vpc_comps(uint32_t reg, uint32_t mask)
+{
+    uint64_t m = 0;
+    int c;
+    if (reg >= 13)
+        return 0;
+    for (c = 0; c < 4; c++)
+        if (mask & (8u >> c))
+            m |= 1ull << (reg * 4 + c);
+    return m;
+}
+
+/* Types >= 2 carry a denominator: (t >> 1) - 1 is the slice index of the
+ * RCP/RCC whose input D it is; even = constant / D, odd = affine / D. */
+#define VPC_R(id) (2 + 2 * (id))
+#define VPC_P(id) (3 + 2 * (id))
+
+static int vpc_add(int a, int b)
+{
+    if (a == VPC_X || b == VPC_X) return VPC_X;
+    if (a == VPC_K) return b < 2 ? b : b | 1;       /* K + R = (K D + k) / D */
+    if (b == VPC_K) return a < 2 ? a : a | 1;
+    if (a == VPC_A && b == VPC_A) return VPC_A;
+    if (a >= 2 && b >= 2 && (a >> 1) == (b >> 1)) return a | b;
+    return VPC_X;                                   /* A + .../D */
+}
+
+static int vpc_mul(int a, int b)
+{
+    if (a == VPC_X || b == VPC_X) return VPC_X;
+    if (a == VPC_K) return b;
+    if (b == VPC_K) return a;
+    if (a == VPC_A && b >= 2 && !(b & 1)) return b | 1;   /* A * K/D */
+    if (b == VPC_A && a >= 2 && !(a & 1)) return a | 1;
+    return VPC_X;                                   /* A*A, .../D * .../D */
+}
+
+static int vpc_src_type(const VpcIns *in, int k, int comp, int (*rt)[4], int a0t)
+{
+    const VpcSrc *s = &in->s[k];
+    switch (s->mux) {
+    case 1: return s->reg < 13 ? rt[s->reg][s->sw[comp]] : VPC_K;
+    case 2: return in->vattr == 0 ? VPC_A : VPC_X;
+    case 3: return in->rel ? (a0t == VPC_K ? VPC_K : VPC_X) : VPC_K;
+    default: return VPC_K;                          /* reads zero */
+    }
+}
+
+/* Source components an op reads for output components L (mask, bit c =
+ * component c): bit 4 * k + j = source k, swizzled component j. */
+static uint32_t vpc_mac_reads(uint32_t mac, uint32_t L)
+{
+    uint32_t r = 0, c;
+    if (!L)
+        return 0;
+    switch (mac) {
+    case 1: return L;                                       /* MOV: A */
+    case 13: return 1;                                      /* ARL: A.x */
+    case 2: case 9: case 10: case 11: case 12: return L | L << 4;
+    case 3: return L | L << 8;                              /* ADD: A, C */
+    case 4: return L | L << 4 | L << 8;                     /* MAD */
+    case 5: return 0x77;                                    /* DP3 */
+    case 6: return 0xF7;                                    /* DPH */
+    case 7: return 0xFF;                                    /* DP4 */
+    case 8:                                                 /* DST */
+        for (c = 0; c < 4; c++)
+            if (L & (1u << c))
+                r |= c == 1 ? 0x22 : c == 2 ? 0x04 : c == 3 ? 0x80 : 0;
+        return r;
+    default: return 0;
+    }
+}
+
+static uint32_t vpc_ilu_reads(uint32_t ilu, uint32_t L)
+{
+    if (!L) return 0;
+    if (ilu == 1) return L << 8;                            /* MOV: C */
+    if (ilu == 7) return 0xB00;                             /* LIT: C.x y w */
+    return 0x100;                                           /* scalar: C.x */
+}
+
+/* Register-mask (bit 3 = x) -> component mask (bit c = component c). */
+static uint32_t vpc_cmask(uint32_t m)
+{
+    return ((m >> 3) & 1) | ((m >> 1) & 2) | ((m << 1) & 4) | ((m << 3) & 8);
+}
+
+static uint64_t vpc_live_of(uint64_t live, uint32_t reg, uint32_t cm)
+{
+    uint32_t c, out = 0;
+    if (reg >= 13) return 0;
+    for (c = 0; c < 4; c++)
+        if ((cm & (1u << c)) && (live >> (reg * 4 + c) & 1))
+            out |= 1u << c;
+    return out;
+}
+
+static int vpc_is_v0(const VpcIns *in, int k)
+{
+    const VpcSrc *q = &in->s[k];
+    return q->mux == 2 && in->vattr == 0 && !q->neg
+        && q->sw[0] == 0 && q->sw[1] == 1 && q->sw[2] == 2 && q->sw[3] == 3;
+}
+
+/* Register reg, x and y unswizzled (the tail only uses those). */
+static int vpc_is_reg(const VpcIns *in, int k, uint32_t reg)
+{
+    const VpcSrc *q = &in->s[k];
+    return q->mux == 1 && q->reg == reg && !q->neg && q->sw[0] == 0 && q->sw[1] == 1;
+}
+
+/* A constant without the index register; all four components unswizzled
+ * (n = 4) or x and y (n = 2). */
+static int vpc_is_const(const VpcIns *in, int k, int n)
+{
+    const VpcSrc *q = &in->s[k];
+    return q->mux == 3 && !in->rel && !q->neg && q->sw[0] == 0 && q->sw[1] == 1
+        && (n < 4 || (q->sw[2] == 2 && q->sw[3] == 3));
+}
+
+/* The XDK shape: rows dp4'd into oPos, RCC/RCP of oPos.w, mul by a scale
+ * constant, mad with the reciprocal and an offset constant. */
+static void vpc_match_fast(VpcProg *p)
+{
+    int row[4] = { -1, -1, -1, -1 }, phase = 0, cs = -1, co = -1;
+    int rreg = -1, rcomp = -1, rcp = 0;
+    uint32_t i;
+
+    p->fast = 0;
+    for (i = 0; i < p->n; i++) {
+        const VpcIns *in = &p->ins[i];
+        int out_mac = in->omask && in->o_out && in->o_addr == 0 && !in->o_ilu;
+        if (in->run_ilu) {
+            const VpcSrc *q = &in->s[2];
+            uint32_t cm = vpc_cmask(in->imask);
+            if ((in->ilu != 2 && in->ilu != 3) || phase != 0 || row[3] < 0)
+                return;
+            if (q->mux != 1 || q->reg != 12 || q->neg || q->sw[0] != 3)
+                return;
+            if (in->ird >= 12 || (cm & (cm - 1)) || !cm || (in->omask && in->o_ilu))
+                return;
+            rreg = in->ird;
+            rcomp = cm == 1 ? 0 : cm == 2 ? 1 : cm == 4 ? 2 : 3;
+            rcp = in->ilu == 2;
+            phase = 1;
+        }
+        if (!in->run_mac)
+            continue;
+        if (in->mmask && in->dst < 13)
+            return;                                 /* temp writes: not the shape */
+        if (in->mac == 7 && out_mac && vpc_is_v0(in, 0) && vpc_is_const(in, 1, 4)) {
+            uint32_t cm = vpc_cmask(in->omask), c;
+            if (phase > 1 || (cm & (cm - 1)) || !cm)
+                return;
+            c = cm == 1 ? 0 : cm == 2 ? 1 : cm == 4 ? 2 : 3;
+            if (c == 3 && phase)
+                return;                             /* w after its reciprocal */
+            row[c] = in->cidx;
+        } else if (in->mac == 2 && out_mac && phase == 1 && row[0] >= 0 && row[1] >= 0
+                   && vpc_is_reg(in, 0, 12)
+                   && vpc_is_const(in, 1, 2) && (in->omask & 0xC) == 0xC && !(in->omask & 1)) {
+            cs = in->cidx;
+            phase = 2;
+        } else if (in->mac == 4 && out_mac && phase == 2 && vpc_is_reg(in, 0, 12)
+                   && vpc_is_const(in, 2, 2) && (in->omask & 0xC) == 0xC && !(in->omask & 1)) {
+            const VpcSrc *q = &in->s[1];
+            if (q->mux != 1 || (int)q->reg != rreg || q->neg
+             || q->sw[0] != rcomp || q->sw[1] != rcomp)
+                return;
+            co = in->cidx;
+            phase = 3;
+        } else {
+            return;
+        }
+    }
+    if (phase != 3 || row[0] < 0 || row[1] < 0 || row[3] < 0)
+        return;
+    memcpy(p->row, row, sizeof row);
+    p->cs = cs;
+    p->co = co;
+    p->rcp = rcp;
+    p->fast = 1;
+}
+
+static void vpc_analyse(VpcProg *p)
+{
+    VpcIns all[VP_SLOTS];
+    uint32_t n = 0, pc, i;
+    uint64_t live = vpc_comps(12, 0xD);             /* oPos x, y, w (bit 3 = x) */
+    int a0_live = 0;
+    int rt[13][4], a0t = VPC_K, c;
+
+    p->ok = 0;
+    p->fast = 0;
+    p->den = -1;
+    p->n = 0;
+    for (pc = p->start; pc < VP_SLOTS; pc++) {
+        vpc_decode(s_vp.prog[pc], &all[n]);
+        if (all[n].omask && !all[n].o_out) {
+            p->why = "writes constants";
+            return;
+        }
+        if (all[n++].final)
+            break;
+    }
+    p->why = "no FINAL";
+    if (!n || !all[n - 1].final)
+        return;
+    /* Backward: which units, and which source components, oPos.xyw needs. */
+    for (i = n; i-- > 0; ) {
+        VpcIns *in = &all[i];
+        uint64_t wm = 0, wi = 0;
+        uint32_t Lm = 0, Li = 0, reads = 0, k, j;
+        int out = in->omask && in->o_out && in->o_addr == 0;
+        if (in->mac && in->mac != 13 && in->dst < 13) {
+            wm |= vpc_comps(in->dst, in->mmask);
+            Lm |= vpc_live_of(live, in->dst, vpc_cmask(in->mmask));
+        }
+        if (in->ilu && in->ird < 13) {
+            wi |= vpc_comps(in->ird, in->imask);
+            Li |= vpc_live_of(live, in->ird, vpc_cmask(in->imask));
+        }
+        if (out && !in->o_ilu) {
+            wm |= vpc_comps(12, in->omask);
+            Lm |= vpc_live_of(live, 12, vpc_cmask(in->omask));
+        }
+        if (out && in->o_ilu) {
+            wi |= vpc_comps(12, in->omask);
+            Li |= vpc_live_of(live, 12, vpc_cmask(in->omask));
+        }
+        in->run_mac = Lm != 0 || (in->mac == 13 && a0_live);
+        in->run_ilu = in->ilu && Li != 0;
+        if (in->mac == 13 && a0_live) {
+            a0_live = 0;
+            Lm = 1;
+        }
+        live &= ~(wm | wi);
+        if (in->run_mac) reads |= vpc_mac_reads(in->mac, Lm);
+        if (in->run_ilu) reads |= vpc_ilu_reads(in->ilu, Li);
+        for (k = 0; k < 3; k++)
+            for (j = 0; j < 4; j++) {
+                const VpcSrc *q = &in->s[k];
+                if (!(reads & (1u << (4 * k + j))))
+                    continue;
+                if (q->mux == 1 && q->reg < 13)
+                    live |= 1ull << (q->reg * 4 + q->sw[j]);
+                else if (q->mux == 3 && in->rel)
+                    a0_live = 1;
+            }
+    }
+    /* Forward: types of the kept units, in order. */
+    for (i = 0; i < 13; i++)
+        for (c = 0; c < 4; c++)
+            rt[i][c] = VPC_K;                       /* registers start at 0 */
+    for (i = 0; i < n; i++) {
+        const VpcIns *in = &all[i];
+        int A[4], B[4], C[4], m[4], l[4];
+        if (!in->run_mac && !in->run_ilu)
+            continue;
+        if (p->n >= VPC_MAX) {
+            p->why = "slice too long";
+            return;
+        }
+        for (c = 0; c < 4; c++) {
+            A[c] = vpc_src_type(in, 0, c, rt, a0t);
+            B[c] = vpc_src_type(in, 1, c, rt, a0t);
+            C[c] = vpc_src_type(in, 2, c, rt, a0t);
+            m[c] = l[c] = VPC_K;
+        }
+        if (in->run_mac) {
+            switch (in->mac) {
+            case 0: break;
+            case 1: case 13: memcpy(m, A, sizeof m); break;
+            case 2: for (c = 0; c < 4; c++) m[c] = vpc_mul(A[c], B[c]); break;
+            case 3: for (c = 0; c < 4; c++) m[c] = vpc_add(A[c], C[c]); break;
+            case 4: for (c = 0; c < 4; c++) m[c] = vpc_add(vpc_mul(A[c], B[c]), C[c]); break;
+            case 5: case 6: case 7: {
+                int t = vpc_add(vpc_add(vpc_mul(A[0], B[0]), vpc_mul(A[1], B[1])), vpc_mul(A[2], B[2]));
+                if (in->mac == 6) t = vpc_add(t, B[3]);
+                if (in->mac == 7) t = vpc_add(t, vpc_mul(A[3], B[3]));
+                for (c = 0; c < 4; c++) m[c] = t;
+                break;
+            }
+            case 8: m[0] = VPC_K; m[1] = vpc_mul(A[1], B[1]); m[2] = A[2]; m[3] = B[3]; break;
+            default:                                /* MIN MAX SLT SGE */
+                for (c = 0; c < 4; c++)
+                    m[c] = (A[c] == VPC_K && B[c] == VPC_K) ? VPC_K : VPC_X;
+                break;
+            }
+        }
+        if (in->run_ilu) {
+            switch (in->ilu) {
+            case 1: memcpy(l, C, sizeof l); break;
+            case 2: case 3: {
+                int t = C[0] == VPC_K ? VPC_K : C[0] == VPC_A ? VPC_R((int)p->n) : VPC_X;
+                for (c = 0; c < 4; c++) l[c] = t;
+                break;
+            }
+            default:
+                for (c = 0; c < 4; c++) l[c] = C[0] == VPC_K && C[1] == VPC_K
+                                            && C[2] == VPC_K && C[3] == VPC_K ? VPC_K : VPC_X;
+                break;
+            }
+        }
+        if (in->run_mac) {
+            if (in->mac == 13)
+                a0t = A[0] == VPC_K ? VPC_K : VPC_X;
+            else if (in->mac && in->dst < 13)
+                for (c = 0; c < 4; c++)
+                    if (in->mmask & (8u >> c)) rt[in->dst][c] = m[c];
+        }
+        if (in->run_ilu && in->ird < 13)
+            for (c = 0; c < 4; c++)
+                if (in->imask & (8u >> c)) rt[in->ird][c] = l[c];
+        if (in->omask && in->o_out && in->o_addr == 0 && (in->o_ilu ? in->run_ilu : in->run_mac))
+            for (c = 0; c < 4; c++)
+                if (in->omask & (8u >> c)) rt[12][c] = in->o_ilu ? l[c] : m[c];
+        p->ins[p->n++] = *in;
+    }
+    {
+        int tx = rt[12][0], ty = rt[12][1], tw = rt[12][3], den = -1;
+        p->tx = tx; p->ty = ty; p->tw = tw;
+        p->why = "oPos type";
+        if (tw != VPC_A && tw != VPC_K)
+            return;
+        if (tx == VPC_X || ty == VPC_X)
+            return;
+        if (tx >= 2) den = tx >> 1;
+        if (ty >= 2) {
+            if (den >= 0 && den != ty >> 1)
+                return;
+            den = ty >> 1;
+        }
+        p->den = den >= 1 ? den - 1 : -1;
+        p->ok = 1;
+        vpc_match_fast(p);
+    }
+}
+
+#define VPC_CACHE 64
+static VpcProg  s_vpc[VPC_CACHE];
+static VpcProg *s_vpc_cur;
+static uint32_t s_vpc_analysed, s_vpc_lookups;
+static uint32_t s_vpc_gen;
+
+static VpcProg *vpc_get(void)
+{
+    uint64_t h = 1469598103934665603ull;
+    uint32_t pc, k;
+    VpcProg *p;
+
+    if (s_vpc_cur && s_vpc_gen == s_vp.prog_gen)
+        return s_vpc_cur;
+    s_vpc_lookups++;
+    for (pc = s_vp.prog_start; pc < VP_SLOTS; pc++) {
+        for (k = 1; k < 4; k++)
+            h = (h ^ s_vp.prog[pc][k]) * 1099511628211ull;
+        if (s_vp.prog[pc][3] & 1)
+            break;
+    }
+    h ^= s_vp.prog_start;
+    p = &s_vpc[(h ^ (h >> 29)) % VPC_CACHE];
+    if (p->hash != h || p->start != s_vp.prog_start || !p->hash) {
+        static int shown;
+        s_vpc_analysed++;
+        p->hash = h;
+        p->start = s_vp.prog_start;
+        p->why = "";
+        vpc_analyse(p);
+        if (getenv("RECOMP_CULL_TRACE") && shown++ < 40) {
+            uint32_t i;
+            fprintf(stderr, "[cull] program at %u: %s%s, slice %u, oPos types x %d y %d w %d, den %d%s\n",
+                    p->start, p->ok ? "eligible" : "not eligible: ", p->ok ? "" : p->why,
+                    p->n, p->tx, p->ty, p->tw, p->den, p->fast ? ", fast form" : "");
+            for (i = 0; i < p->n; i++) {
+                const VpcIns *q = &p->ins[i];
+                fprintf(stderr, "[cull]   %s%s mac %u ilu %u dst r%u.%X ird r%u.%X out %u:%u.%X%s v%u c%u%s | "
+                        "A %u:%u%s.%u%u%u%u B %u:%u%s.%u%u%u%u C %u:%u%s.%u%u%u%u\n", q->run_mac ? "M" : "-", q->run_ilu ? "I" : "-", q->mac, q->ilu, q->dst, q->mmask, q->ird,
+                        q->imask, q->o_out, q->o_addr, q->omask, q->o_ilu ? "(ilu)" : "", q->vattr,
+                        q->cidx, q->rel ? "+a0" : "",
+                        q->s[0].mux, q->s[0].reg, q->s[0].neg ? "-" : "", q->s[0].sw[0], q->s[0].sw[1], q->s[0].sw[2], q->s[0].sw[3],
+                        q->s[1].mux, q->s[1].reg, q->s[1].neg ? "-" : "", q->s[1].sw[0], q->s[1].sw[1], q->s[1].sw[2], q->s[1].sw[3],
+                        q->s[2].mux, q->s[2].reg, q->s[2].neg ? "-" : "", q->s[2].sw[0], q->s[2].sw[1], q->s[2].sw[2], q->s[2].sw[3]);
+            }
+        }
+    }
+    s_vpc_cur = p;
+    s_vpc_gen = s_vp.prog_gen;
+    return p;
+}
+
+/* Run the slice for one position; out = oPos (screen xy, z, clip w), *den =
+ * the denominator's value (when the slice has one). */
+static void vpc_eval(const VpcProg *p, const float pos[4], float out[4], float *den)
+{
+    static const float zero[4];
+    float r[13][4];
+    int a0 = 0;
+    uint32_t i;
+
+    memset(r, 0, sizeof r);
+    for (i = 0; i < p->n; i++) {
+        const VpcIns *in = &p->ins[i];
+        float S[3][4], m[4] = {0}, l[4] = {0}, x;
+        int k, c;
+        for (k = 0; k < 3; k++) {
+            const float *s = zero;
+            const VpcSrc *q = &in->s[k];
+            if (q->mux == 1) {
+                if (q->reg < 13) s = r[q->reg];
+            } else if (q->mux == 2) {
+                if (in->vattr == 0) s = pos;
+            } else if (q->mux == 3) {
+                int ci = (int)in->cidx + (in->rel ? a0 : 0);
+                if (ci >= 0 && ci < VP_CONSTS) s = s_vp.c[ci];
+            }
+            for (c = 0; c < 4; c++)
+                S[k][c] = q->neg ? -s[q->sw[c]] : s[q->sw[c]];
+        }
+#define A_ S[0]
+#define B_ S[1]
+#define C_ S[2]
+        switch (in->mac) {
+        case 1: memcpy(m, A_, sizeof m); break;
+        case 2: for (c = 0; c < 4; c++) m[c] = A_[c] * B_[c]; break;
+        case 3: for (c = 0; c < 4; c++) m[c] = A_[c] + C_[c]; break;
+        case 4: for (c = 0; c < 4; c++) m[c] = A_[c] * B_[c] + C_[c]; break;
+        case 5: vp_splat(m, A_[0]*B_[0] + A_[1]*B_[1] + A_[2]*B_[2]); break;
+        case 6: vp_splat(m, A_[0]*B_[0] + A_[1]*B_[1] + A_[2]*B_[2] + B_[3]); break;
+        case 7: vp_splat(m, A_[0]*B_[0] + A_[1]*B_[1] + A_[2]*B_[2] + A_[3]*B_[3]); break;
+        case 8: m[0] = 1.0f; m[1] = A_[1] * B_[1]; m[2] = A_[2]; m[3] = B_[3]; break;
+        case 9: for (c = 0; c < 4; c++) m[c] = A_[c] < B_[c] ? A_[c] : B_[c]; break;
+        case 10: for (c = 0; c < 4; c++) m[c] = A_[c] > B_[c] ? A_[c] : B_[c]; break;
+        case 11: for (c = 0; c < 4; c++) m[c] = A_[c] < B_[c] ? 1.0f : 0.0f; break;
+        case 12: for (c = 0; c < 4; c++) m[c] = A_[c] >= B_[c] ? 1.0f : 0.0f; break;
+        }
+        x = C_[0];
+        switch (in->ilu) {
+        case 1: memcpy(l, C_, sizeof l); break;
+        case 2: vp_splat(l, x != 0.0f ? 1.0f / x : 1.884467e+19f); break;
+        case 3: {
+            float y = x != 0.0f ? 1.0f / x : 1.884467e+19f, a = fabsf(y);
+            if (a < 5.42101e-20f) a = 5.42101e-20f;
+            if (a > 1.884467e+19f) a = 1.884467e+19f;
+            vp_splat(l, y < 0.0f ? -a : a);
+            break;
+        }
+        case 4: vp_splat(l, x != 0.0f ? 1.0f / sqrtf(fabsf(x)) : 1.884467e+19f); break;
+        case 5: {                                   /* EXP */
+            float f = floorf(x);
+            l[0] = exp2f(f); l[1] = x - f; l[2] = exp2f(x); l[3] = 1.0f;
+            break;
+        }
+        case 6: {                                   /* LOG */
+            float a = fabsf(x);
+            if (a == 0.0f) {
+                l[0] = l[2] = -1.884467e+19f; l[1] = 1.0f;
+            } else {
+                float e = floorf(log2f(a));
+                l[0] = e; l[1] = a / exp2f(e); l[2] = log2f(a);
+            }
+            l[3] = 1.0f;
+            break;
+        }
+        case 7: {                                   /* LIT */
+            float lx = C_[0] > 0.0f ? C_[0] : 0.0f, ly = C_[1] > 0.0f ? C_[1] : 0.0f;
+            float w = C_[3];
+            if (w < -127.996f) w = -127.996f;
+            if (w > 127.996f) w = 127.996f;
+            l[0] = 1.0f; l[1] = lx;
+            l[2] = (lx > 0.0f && ly > 0.0f) ? exp2f(w * log2f(ly)) : 0.0f;
+            l[3] = 1.0f;
+            break;
+        }
+        }
+        if (p->den == (int)i)
+            *den = x;
+        if (in->run_mac) {
+            if (in->mac == 13)
+                a0 = (int)floorf(A_[0] + 0.001f);
+            else if (in->mac && in->dst < 13)
+                vp_write(r[in->dst], in->mmask, m);
+        }
+        if (in->run_ilu && in->ird < 13)
+            vp_write(r[in->ird], in->imask, l);
+        if (in->omask && in->o_out && in->o_addr == 0 && (in->o_ilu ? in->run_ilu : in->run_mac))
+            vp_write(r[12], in->omask, in->o_ilu ? l : m);
+#undef A_
+#undef B_
+#undef C_
+    }
+    memcpy(out, r[12], sizeof r[12]);
+}
+
+static int cull_env(const char *name, int dflt)
+{
+    const char *e = getenv(name);
+    return e && *e ? *e != '0' : dflt;
+}
+
+static struct {
+    int      on, check, stats;
+    uint64_t next_ms;
+    uint32_t flips0;
+    uint32_t draws, tested, culled, inelig_prog, inelig_attr, behind, check_bad;
+    uint64_t ns, verts;
+    uint32_t same_all, same_but_consts, same_but_verts;
+    uint32_t prev_valid, prev_prog_gen, prev_const_gen, prev_nv, prev_ni, prev_prim;
+    uint32_t prev_tex[4];
+    uint64_t prev_idx_hash, prev_attr_hash;
+    uint32_t prev_regs[0x2000 / 4];
+} s_cull = { .on = -1 };
+
+/* Bounding box of attribute 0 over gathered vertices lo .. lo+nv-1. */
+static int cull_bbox(uint32_t lo, uint32_t nv, float bmin[3], float bmax[3])
+{
+    const VertexAttr *a = &s_gpu.attr[0];
+    const uint8_t *base;
+    uint32_t i, c, n = a->size < 3 ? a->size : 3;
+
+    if (!a->size || !a->stride || a->size > 4 || !nv)
+        return 0;
+    if (s_gpu.inline_active) {
+        size_t end = (size_t)a->offset + (size_t)(lo + nv - 1) * a->stride + 4 * a->size;
+        if (end > (size_t)s_gpu.inline_count * 4)
+            return 0;
+        base = (const uint8_t *)s_gpu.inline_buf + a->offset;
+    } else {
+        if (!a->offset)
+            return 0;
+        base = (const uint8_t *)xbox_GetMemoryOffset() + a->offset;
+    }
+    for (c = 0; c < 3; c++) {
+        bmin[c] = INFINITY;
+        bmax[c] = -INFINITY;
+    }
+    if (a->type == 2) {
+        if (a->size == 4) {                     /* w must be 1 throughout */
+            for (i = 0; i < nv; i++) {
+                float w;
+                memcpy(&w, base + (size_t)(lo + i) * a->stride + 12, 4);
+                if (w != 1.0f)
+                    return 0;
+            }
+        }
+        if (n == 3) {
+            /* Branch-free; a NaN vertex drops out of the box (it draws
+             * nothing). */
+            const uint8_t *p = base + (size_t)lo * a->stride;
+            float x0 = INFINITY, y0 = INFINITY, z0 = INFINITY;
+            float x1 = -INFINITY, y1 = -INFINITY, z1 = -INFINITY;
+            for (i = 0; i < nv; i++, p += a->stride) {
+                float v[3];
+                memcpy(v, p, 12);
+                x0 = v[0] < x0 ? v[0] : x0; x1 = v[0] > x1 ? v[0] : x1;
+                y0 = v[1] < y0 ? v[1] : y0; y1 = v[1] > y1 ? v[1] : y1;
+                z0 = v[2] < z0 ? v[2] : z0; z1 = v[2] > z1 ? v[2] : z1;
+            }
+            bmin[0] = x0; bmin[1] = y0; bmin[2] = z0;
+            bmax[0] = x1; bmax[1] = y1; bmax[2] = z1;
+        } else {
+            for (i = 0; i < nv; i++) {
+                const uint8_t *p = base + (size_t)(lo + i) * a->stride;
+                float v[3];
+                memcpy(v, p, 4 * n);
+                for (c = 0; c < n; c++) {
+                    if (v[c] < bmin[c]) bmin[c] = v[c];
+                    if (v[c] > bmax[c]) bmax[c] = v[c];
+                }
+            }
+        }
+    } else if ((a->type == 1 || a->type == 5) && a->size <= 3) {
+        int16_t smin[3] = { 32767, 32767, 32767 }, smax[3] = { -32768, -32768, -32768 };
+        for (i = 0; i < nv; i++) {
+            const uint8_t *p = base + (size_t)(lo + i) * a->stride;
+            int16_t v[3];
+            memcpy(v, p, 2 * n);
+            for (c = 0; c < n; c++) {
+                if (v[c] < smin[c]) smin[c] = v[c];
+                if (v[c] > smax[c]) smax[c] = v[c];
+            }
+        }
+        for (c = 0; c < n; c++) {
+            float f0 = smin[c], f1 = smax[c];
+            if (a->type == 1) {
+                f0 = f0 / 32767.0f < -1.0f ? -1.0f : f0 / 32767.0f;
+                f1 = f1 / 32767.0f < -1.0f ? -1.0f : f1 / 32767.0f;
+            }
+            bmin[c] = f0;
+            bmax[c] = f1;
+        }
+    } else {
+        return 0;
+    }
+    for (c = 0; c < n; c++)
+        if (!isfinite(bmin[c]) || !isfinite(bmax[c]))
+            return 0;
+    for (c = n; c < 3; c++)
+        bmin[c] = bmax[c] = 0.0f;               /* fetch_attr's defaults */
+    return 1;
+}
+
+/* 1: every vertex of the batch is outside the clip rectangle. */
+static int cull_offscreen(uint32_t lo, uint32_t nv, int vp)
+{
+    float bmin[3], bmax[3];
+    float sx0 = INFINITY, sx1 = -INFINITY, sy0 = INFINITY, sy1 = -INFINITY;
+    const VpcProg *p = NULL;
+    int k, dsign = 0;
+    const float margin = 2.0f;
+
+    if (vp) {
+        p = vpc_get();
+        if (!p->ok) {
+            s_cull.inelig_prog++;
+            return 0;
+        }
+    }
+    if (!cull_bbox(lo, nv, bmin, bmax)) {
+        s_cull.inelig_attr++;
+        return 0;
+    }
+    s_cull.tested++;
+    for (k = 0; k < 8; k++) {
+        float pos[4], o[4], den = 1.0f, x, y;
+        pos[0] = (k & 1) ? bmax[0] : bmin[0];
+        pos[1] = (k & 2) ? bmax[1] : bmin[1];
+        pos[2] = (k & 4) ? bmax[2] : bmin[2];
+        pos[3] = 1.0f;
+        if (vp && p->fast) {
+            const float *r0 = s_vp.c[p->row[0]], *r1 = s_vp.c[p->row[1]], *r3 = s_vp.c[p->row[3]];
+            const float *cs = s_vp.c[p->cs], *co = s_vp.c[p->co];
+            float w = pos[0] * r3[0] + pos[1] * r3[1] + pos[2] * r3[2] + pos[3] * r3[3];
+            float rc, a;
+            if (!(w > 1e-6f))
+                goto behind;
+            rc = 1.0f / w;
+            if (!p->rcp) {                          /* RCC's clamp */
+                a = rc;
+                if (a < 5.42101e-20f) a = 5.42101e-20f;
+                if (a > 1.884467e+19f) a = 1.884467e+19f;
+                rc = a;
+            }
+            x = (pos[0] * r0[0] + pos[1] * r0[1] + pos[2] * r0[2] + pos[3] * r0[3]) * cs[0] * rc + co[0];
+            y = (pos[0] * r1[0] + pos[1] * r1[1] + pos[2] * r1[2] + pos[3] * r1[3]) * cs[1] * rc + co[1];
+            if (!isfinite(x) || !isfinite(y))
+                goto behind;
+            x *= s_gpu.aa_sx;
+            y *= s_gpu.aa_sy;
+        } else if (vp) {
+            vpc_eval(p, pos, o, &den);
+            if (!(o[3] > 1e-6f) || !isfinite(o[0]) || !isfinite(o[1]))
+                goto behind;
+            if (p->den >= 0) {
+                int sg = den > 1e-12f ? 1 : den < -1e-12f ? -1 : 0;
+                if (!sg || (dsign && sg != dsign))
+                    goto behind;
+                dsign = sg;
+            }
+            x = o[0] * s_gpu.aa_sx;
+            y = o[1] * s_gpu.aa_sy;
+        } else {
+            const float *m = s_gpu.composite;
+            float c4[4];
+            int i;
+            for (i = 0; i < 4; i++)
+                c4[i] = m[4 * i] * pos[0] + m[4 * i + 1] * pos[1] + m[4 * i + 2] * pos[2] + m[4 * i + 3];
+            if (!(c4[3] > 1e-6f))
+                goto behind;
+            x = (c4[0] / c4[3] + s_gpu.vp_offset[0]) * s_gpu.aa_sx;
+            y = (c4[1] / c4[3] + s_gpu.vp_offset[1]) * s_gpu.aa_sy;
+            if (!isfinite(x) || !isfinite(y))
+                goto behind;
+        }
+        if (x < sx0) sx0 = x;
+        if (x > sx1) sx1 = x;
+        if (y < sy0) sy0 = y;
+        if (y > sy1) sy1 = y;
+    }
+    return sx1 < (float)s_gpu.clip_x - margin
+        || sx0 > (float)(s_gpu.clip_x + s_gpu.clip_w) + margin
+        || sy1 < (float)s_gpu.clip_y - margin
+        || sy0 > (float)(s_gpu.clip_y + s_gpu.clip_h) + margin;
+behind:
+    s_cull.behind++;
+    return 0;
+}
+
+/* RECOMP_CULL_CHECK: does any vertex of a rejected batch land inside? Runs
+ * the full interpreter on every index (slow; a test mode). */
+static int cull_check(void)
+{
+    uint32_t i;
+    for (i = 0; i < s_gpu.idx_count; i++) {
+        float q[4];
+        if (!fetch_position(s_gpu.idx[i], q))
+            return 1;                               /* w = 0: unexpected */
+        if (q[3] < 0.0f)
+            return 1;                               /* behind the eye */
+        if (q[0] >= (float)s_gpu.clip_x && q[0] <= (float)(s_gpu.clip_x + s_gpu.clip_w)
+         && q[1] >= (float)s_gpu.clip_y && q[1] <= (float)(s_gpu.clip_y + s_gpu.clip_h))
+            return 1;
+    }
+    return 0;
+}
+
+static void cull_report(void)
+{
+    uint64_t now = GetTickCount64();
+    uint32_t frames;
+
+    if (!s_cull.next_ms) {
+        s_cull.next_ms = now + 10000;
+        s_cull.flips0 = s_gpu.flips;
+        return;
+    }
+    if (now < s_cull.next_ms)
+        return;
+    frames = s_gpu.flips - s_cull.flips0;
+    if (!frames)
+        frames = 1;
+    fprintf(stderr, "[cull] program lookups %u, analysed %u\n", s_vpc_lookups, s_vpc_analysed);
+    fprintf(stderr, "[cull] test %.2f us/draw, %.0f vertices/draw\n",
+            s_cull.draws ? s_cull.ns / 1000.0 / s_cull.draws : 0.0,
+            s_cull.draws ? (double)s_cull.verts / s_cull.draws : 0.0);
+    s_cull.ns = s_cull.verts = 0;
+    fprintf(stderr, "[cull] per frame: %u draws, %u tested, %u off screen%s; not tested: %u program, "
+            "%u attribute, %u behind the eye; check mismatches %u | same as previous: %u all, "
+            "%u but constants, %u but constants+vertices\n",
+            s_cull.draws / frames, s_cull.tested / frames, s_cull.culled / frames,
+            s_cull.on ? " (skipped)" : " (drawn)", s_cull.inelig_prog / frames,
+            s_cull.inelig_attr / frames, s_cull.behind / frames, s_cull.check_bad,
+            s_cull.same_all / frames, s_cull.same_but_consts / frames, s_cull.same_but_verts / frames);
+    s_cull.draws = s_cull.tested = s_cull.culled = s_cull.inelig_prog = s_cull.inelig_attr = 0;
+    s_cull.behind = s_cull.same_all = s_cull.same_but_consts = s_cull.same_but_verts = 0;
+    s_cull.next_ms = now + 10000;
+    s_cull.flips0 = s_gpu.flips;
+}
+
+/* Draw-merging statistics: is this batch the previous one again, apart from
+ * the transform constants (instancing) or also its vertex arrays? */
+static void cull_merge_stats(uint32_t lo, uint32_t nv)
+{
+    uint64_t ih = 1469598103934665603ull, ah = 1469598103934665603ull;
+    uint32_t i, tex[4];
+    int regs_same, verts_same;
+
+    for (i = 0; i < s_gpu.idx_count; i++)
+        ih = (ih ^ (s_gpu.idx[i] - lo)) * 1099511628211ull;
+    for (i = 0; i < NV_VERTEX_ATTRS; i++) {
+        const VertexAttr *a = &s_gpu.attr[i];
+        ah = (ah ^ (a->offset + lo * a->stride)) * 1099511628211ull;
+        ah = (ah ^ (a->type | a->size << 8 | a->stride << 16)) * 1099511628211ull;
+    }
+    for (i = 0; i < 4; i++)
+        tex[i] = s_reg[(0x1B00u + i * 0x40u) / 4];
+    regs_same = s_cull.prev_valid && !memcmp(s_cull.prev_regs, s_reg, sizeof s_cull.prev_regs);
+    verts_same = ih == s_cull.prev_idx_hash && ah == s_cull.prev_attr_hash && nv == s_cull.prev_nv;
+    if (regs_same && s_cull.prev_prog_gen == s_vp.prog_gen && s_cull.prev_prim == s_gpu.prim
+     && !memcmp(tex, s_cull.prev_tex, sizeof tex)) {
+        if (verts_same && s_cull.prev_const_gen == s_vp.const_gen)
+            s_cull.same_all++;
+        else if (verts_same)
+            s_cull.same_but_consts++;
+        else
+            s_cull.same_but_verts++;
+    }
+    memcpy(s_cull.prev_regs, s_reg, sizeof s_cull.prev_regs);
+    memcpy(s_cull.prev_tex, tex, sizeof tex);
+    s_cull.prev_idx_hash = ih;
+    s_cull.prev_attr_hash = ah;
+    s_cull.prev_nv = nv;
+    s_cull.prev_prim = s_gpu.prim;
+    s_cull.prev_prog_gen = s_vp.prog_gen;
+    s_cull.prev_const_gen = s_vp.const_gen;
+    s_cull.prev_valid = 1;
+}
+
+/* 1: drop the batch. lo/nv: the gathered vertex range. */
+static int cull_batch(uint32_t lo, uint32_t nv)
+{
+    int vp, off;
+
+    if (s_cull.on < 0) {
+        s_cull.on = cull_env("RECOMP_CULL", 1);
+        s_cull.check = cull_env("RECOMP_CULL_CHECK", 0);
+        s_cull.stats = cull_env("RECOMP_DRAW_STATS", 0);
+    }
+    if (s_cull.stats) {
+        s_cull.draws++;
+        cull_report();
+    }
+    if (!s_cull.on && !s_cull.stats)
+        return 0;
+    {
+        struct timespec t0, t1;
+        if (s_cull.stats) clock_gettime(CLOCK_MONOTONIC, &t0);
+        vp = 0;
+        if (s_gpu.prim < 5 || s_gpu.prim > 10 || !s_gpu.clip_w || !s_gpu.clip_h)
+            off = 0;                                /* points and lines have size */
+        else if ((vp = batch_is_vp()) || batch_is_ffp())
+            off = cull_offscreen(lo, nv, vp);
+        else
+            off = 0;                                /* pre-transformed */
+        if (s_cull.stats) {
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            s_cull.ns += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec));
+            s_cull.verts += nv;
+        }
+    }
+    if (off) {
+        s_cull.culled++;
+        if (s_cull.check && cull_check()) {
+            if (s_cull.check_bad++ < 20)
+                fprintf(stderr, "[cull] MISMATCH: batch rejected but a vertex is on screen "
+                        "(xform %s, prog start %u, %u indices)\n", vp ? "program" : "fixed",
+                        s_vp.prog_start, s_gpu.idx_count);
+            off = 0;
+        }
+    }
+    if (s_cull.stats && !off)
+        cull_merge_stats(lo, nv);
+    return off && s_cull.on;
+}
+
 /* Hand the batch to a GPU back end as raw NV2A state (see Nv2aRawBatch).
  *
  * Vertices are gathered over the index range the batch touches -- a mesh
@@ -2308,6 +3225,11 @@ static void raw_batch(void)
     nv = hi - lo + 1;
     if (nv > 1u << 20)
         return;                                 /* not a real batch */
+    if (cull_batch(lo, nv)) {
+        s_gpu.drawn_offset = s_gpu.color_offset;
+        s_gpu.drawn_pitch = s_gpu.pitch;
+        return;
+    }
     if (nv > s_raw_cap_v) {
         free(s_raw_attrs);
         s_raw_cap_v = nv + 1024;
@@ -2379,6 +3301,11 @@ static void raw_batch(void)
     }
     memcpy(rb.attr_const, s_gpu.attr_const, sizeof rb.attr_const);
     rb.attr_const_gen = s_gpu.attr_const_gen;
+    if (s_gpu.inline_active)
+        s_vtx_epoch++;                          /* the payload buffer is reused */
+    rb.vtx_epoch = s_vtx_epoch;
+    if (s_gpu.inline_active)
+        s_vtx_epoch++;
     rb.vp_prog_gen = s_vp.prog_gen ? s_vp.prog_gen : 1;
     rb.vp_const_gen = s_vp.const_gen ? s_vp.const_gen : 1;
     if (nv2a_raw_batch_hook)
@@ -3136,6 +4063,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
      * held 0xFF000000 at times, which put the write outside guest memory). */
+    if (method == 0x1D70)
+        s_vtx_epoch++;
     if (method == 0x1D70 && s_sem_va) {
         uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
         *(volatile uint32_t *)(mem + s_sem_va) = param;
@@ -3163,6 +4092,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      * sentinel there, raises the line, waits for the 1, and then clears what
      * the hardware would have cleared. Bounded, so a title with no handler
      * connected costs a moment rather than the frame. */
+    if (subch == 0 && method == 0x0100 && param)
+        s_vtx_epoch++;
     if (subch == 0 && method == 0x0100 && param) {
         extern void xbox_set_irq_line(uint32_t vector, int level);
         extern void xbox_Nv2aHoldInterrupts(int on);
@@ -3426,6 +4357,15 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                         fprintf(stderr, "  [PB] FLIP_STALL: no flip retired in 250 ms "
                                 "(read %u write %u), going on\n",
                                 s_gpu.flip_read, s_gpu.flip_write);
+                    /* Taken as a lost sync: the read index one off the
+                     * driver's stays off (with two buffers, one ahead is one
+                     * behind), and every later stall timed out too -- 3.7 fps
+                     * for good on a Carbon console run. Stepping it puts it
+                     * back; a retire that was only late costs one more
+                     * timeout. */
+                    s_gpu.flip_read = s_gpu.flip_modulo
+                                    ? (s_gpu.flip_read + 1) % s_gpu.flip_modulo
+                                    : s_gpu.flip_read + 1;
                     break;
                 }
                 WaitForSingleObject(driver_event(), 1);

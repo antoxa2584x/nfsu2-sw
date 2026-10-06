@@ -4,13 +4,15 @@
  * Draws that sample the movie texture (the A8R8G8B8 picture sub_0025F0B7
  * fills from the VP6 frame) go through nv2a_raw_batch_hook.
  *
- * The intro trailer before the title screen (MOVIES\FMVOpening.vp6) is a
- * ~1.85:1 film letterboxed into the 640x480 picture. In 16:9 the game draws
- * it as a 4:3 quad at 90% (clip x, y +-1 through a vertex program: 864x448
- * of the 1280x480 surface), so it ends up boxed on all four sides. Scaling
- * that quad's positions by 1/0.675 makes it as wide as the screen; the film
- * (rows 72..404 of the quad) then crops ~6 rows top and bottom. Only in
- * widescreen, only that movie's quad (prim 7, 4 vertices).
+ * In 16:9 the game's movie player draws every movie as a 4:3 quad at 90%
+ * (clip x +-1 through a vertex program: 864 of the 1280 surface columns),
+ * pillarboxed. Scaling that quad's positions by 1/0.675 makes it as wide as
+ * the screen. The intro trailer (MOVIES\FMVOpening.vp6) is a ~1.85:1 film
+ * letterboxed into its 640x480 picture and then crops ~6 rows top and
+ * bottom; every other movie on the disc (logos, PSA, fly-overs, tutorials,
+ * the career story scenes) is full 4:3 and loses ~65 rows top and bottom,
+ * centred. Only in widescreen, only the player's quad (prim 7, 4 vertices,
+ * x = +-1); movies drawn into a smaller window keep their size.
  * NFSU2_MOVIE_CROP=0 off, NFSU2_MOVIE_TRACE=1 logs the movie draws.
  */
 
@@ -56,6 +58,20 @@ static int crop_on(void)
     return on && xbox_video_widescreen();
 }
 
+/* The movie player's full-screen quad: every vertex at clip x = +-1. */
+static int player_quad(const Nv2aRawBatch *rb, const float *attrs)
+{
+    uint32_t i;
+    for (i = 0; i < 4; i++) {
+        float v[4];
+        attr_get(rb, attrs, 0, i, v);
+        if (v[0] < 0.0f) v[0] = -v[0];
+        if (v[0] < 0.99f || v[0] > 1.01f)
+            return 0;
+    }
+    return 1;
+}
+
 static void movie_hook(Nv2aRawBatch *rb, float *attrs)
 {
     static int trace = -1;
@@ -69,7 +85,7 @@ static void movie_hook(Nv2aRawBatch *rb, float *attrs)
     if (!t || nfsu2_movie_row < t || nfsu2_movie_row >= t + MOVIE_BYTES)
         return;
     if (crop_on() && rb->prim == 7 && rb->vertex_count == 4 && (rb->attr_present & 1u)
-        && strstr(nfsu2_movie_name, "FMVOpening")) {
+        && player_quad(rb, attrs)) {
         for (i = 0; i < 4; i++) {
             float *p = attrs + (size_t)i * NV2A_RAW_ATTRS * 4;
             attr_get(rb, attrs, 0, i, p);

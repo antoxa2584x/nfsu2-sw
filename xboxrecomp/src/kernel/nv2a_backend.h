@@ -144,6 +144,12 @@ typedef struct {
      * changes whenever any of them does (never 0). */
     float           attr_const[NV2A_RAW_ATTRS][4];
     uint32_t        attr_const_gen;
+    /* Vertex-memory epoch: changes at every semaphore release and trap
+     * (after which the title may reuse buffers the GPU has finished with)
+     * and around every inline-array batch. Two batches with equal epochs
+     * and equal direct[] pointers read the same vertex bytes, so a back end
+     * may reuse what it uploaded for the first (instancing). */
+    uint32_t        vtx_epoch;
 } Nv2aRawBatch;
 
 /* Resolve a DMA offset the title programmed (texture, surface) to a guest VA. */

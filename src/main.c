@@ -396,6 +396,12 @@ static int game_main(void)
         xbox_OhciInit();
     }
 
+    /* The NIC the title's XNET library drives (src/nic.c). */
+    {
+        extern void nfsu2_nic_init(void);
+        nfsu2_nic_init();
+    }
+
 #ifndef _WIN32
     /* The GPU renderer (NFSU2_GL=0 falls back to the executor's CPU one). */
     {

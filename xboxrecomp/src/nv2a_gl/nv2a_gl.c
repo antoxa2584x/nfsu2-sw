@@ -1654,7 +1654,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     surf[0] = 2.0f / (float)s->w;
     surf[1] = 2.0f / (float)s->h;
     surf[2] = 1.0f / (float)zmax_of(r);
-    surf[3] = 0.0f;
+    surf[3] = 0.5f - 0.5f * (float)s->w / (float)s->pw;   /* see nv2a_snap */
     aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
     aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
     memcpy(m, b->composite, sizeof m);

@@ -9,6 +9,10 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 
 ## Rules
 
+- **Renderer work goes into Vulkan only** (nv2a_vk.c, user's call
+  2026-10-06). Don't spend time on nv2a_gl: no new features or fixes there.
+  Shared shader code (gl_psh.c/gl_vsh.c) may get VK-only paths
+  (`nv2a_shader_vk`); keep the GL output unchanged.
 - Never commit game data (disc, `default.xbe`, `switch_sd/`) or generated C
   (`gen/`). Ask before committing or pushing anything.
 - The Switch build reads the **unpacked** disc at `sdmc:/switch/nfsu2x/game/`,
@@ -172,6 +176,11 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   added that stale edge to screen row/column 1. NV2A snaps screen positions
   to 1/16 px by truncation (xemu roundScreenCoords): `nv2a_snap` in
   gl_vsh.c's nv2a_clip.
+  Came back with RECOMP_GL_SCALE > 1 (fixed 2026-10-05): the snap is in
+  title pixels, but real pixel 0's centre is at 0.5/k there, so the 0.5
+  edge still missed it. `u_surf.w` = 0.5 - 0.5*w/pw shifts positions so
+  each title pixel's first real centre sits on i + 0.5. A/B at 2x: real
+  row/column 1 mean 170 vs 30 without, flat with.
 - prof.bin sample times are 16 bits of 10 ms and wrap every 655 s;
   prof_report.py unwraps them (--time on long runs was empty before).
 - **Files:** no `open()` on directories (`XBOX_DIR_FD` sentinel); FAT can't
@@ -317,6 +326,37 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   culprit: NV062 SET_OFFSET_SOURCE = 0x0308 = SET_CULL_FACE_ENABLE from a
   blit (not traced per method). The old swapped VK winding had hidden it.
   Only subchannel 0 goes into the shadow now.
+- **Instancing (2026-10-05, nv2a_vk.c, `RECOMP_VK_INSTANCE=0` off, `=2`
+  alternates per frame for A/B dumps):** ~25-30% of race draws repeat the
+  previous one with only the transform constants changed. The first is
+  recorded up to vkCmdDrawIndexed and held (`s_pend`); repeats append their
+  192 constants behind it in the ring (binding 6, `c[nv2a_ib + i]`,
+  nv2a_ib = gl_InstanceIndex * 192, up to 16); any other draw/clear/flip
+  issues it with the count. "Repeat" = no register change except the
+  upload windows/per-draw methods (executor dirty blocks), same program,
+  vertex pointers, indices, textures, and same `Nv2aRawBatch.vtx_epoch`
+  (bumped at semaphore releases, traps, inline batches). Drag start line on
+  lavapipe: 1790 -> 1250 draw calls, 21.2 -> 24.5 fps; A/B frames identical
+  but the timer digits; validation clean. `RECOMP_DRAW_STATS=1` logs
+  `[vk] per frame: draws -> draw calls`.
+- **Car reflections = cube maps (2026-10-06, Vulkan only):** car paint and
+  glass use texture mode 3 (CUBE_MAP) on stage 1 (shader program 0x01061),
+  which read black before. SET_TEXTURE_FORMAT bit 2 = cube; faces +X..-Z
+  follow each other, each with its mip chain, padded to 128 bytes. Menu:
+  static 256x256 cube from disc (0x812E7200). Races: a dynamic 128x128
+  cube (0x83095680) the title renders as six 128x128 surfaces (face stride
+  0x10000) every frame; nv2a_vk assembles it from those surfaces with
+  vkCmdBlitImage when a face's `VkSurf.gen` changed (`cube_from_surfaces`).
+  gl_psh.c emits samplerCube + texture(tN, vTN.xyz) only for VK; GL still
+  black. Lavapipe menu/race frames show reflections, validation clean.
+- **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
+  `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
+  the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of
+  attribute 0 through the transform at 8 corners; vertex programs are
+  sliced to what oPos.xyw needs and typed (affine / linear-fractional), the
+  XDK form (dp4 rows + rcc + mul + mad) evaluated directly. Only ~5% of the
+  drag-line draws (the "half draw nothing" are occluded, not off screen);
+  ~0.4 us/draw on x86.
 - **Eden cannot run NVK** (2026-09-29): instance, device, swapchain (only
   IMMEDIATE; FIFO creation hangs) and command recording work, but no GPU
   submission ever completes -- vktest's first fence times out (also with
@@ -367,6 +407,10 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   filter as float32 plus its registers once a second; v0F4 = menu music.
   Still open: `cvtss2si` is lifted as a truncating cast (x86 rounds), 41
   sites -- not this bug, but wrong.
+- **Engine/speech only on the left (fixed 2026-10-03):** the stubbed-EP
+  mixdown (apu_dsp.c) sent even bins left, odd right, so the EA mixer's
+  C/LFE voice v0F5 (bins 2/3: engine, speech) was centre -> left only.
+  Centre, LFE and I3DL2 (bin 10) now go to both sides at -3 dB (`s_downmix`).
 - APU IRQ 5 was raised on Windows only (`#if _WIN32` in apu_core.c) -> no
   DirectSound voice ever started elsewhere.
 - NFSU2 mixes in software (EA engine, thread `sub_00274CA0`) into three 50 ms
@@ -434,9 +478,20 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 - Movies: ealogo, THX_LOGO, PSA, FMVOpening (trailer before Press Start);
   names logged by the sub_00129610 wrapper (`[movie] MOVIES\\...`). In 16:9
   src/movie_crop.c (via `nv2a_raw_batch_hook`, executor -> GL/VK) scales
-  FMVOpening's quad (clip +-1, vertex program, 0.675 of the width) by
-  1/0.675 so the letterboxed film fills the screen. NFSU2_MOVIE_CROP=0 off,
-  NFSU2_MOVIE_TRACE=1 logs movie draws.
+  the player's quad (clip x +-1, vertex program, 0.675 of the width) by
+  1/0.675 so every movie fills the screen (since 2026-10-05; before, only
+  FMVOpening). The disc has 28 MVhd streams (ZZDATA0-2); only FMVOpening is
+  letterboxed, the rest are full 4:3 and lose ~65 rows top/bottom (user's
+  choice: crop, not stretch). Quads not at x +-1 are left alone.
+  NFSU2_MOVIE_CROP=0 off, NFSU2_MOVIE_TRACE=1 logs movie draws.
+- **White flashes in FMVOpening** (2026-10-06): the trailer cuts between
+  its clips with 1-3 flat white frames (luma ~235, in the VP6 data itself;
+  no white between the movies on Linux). movie_vp6.c shows a frame whose
+  middle half is all luma >= 200 as luma 16 (title's buffers only, FFmpeg's
+  reference untouched). `NFSU2_MOVIE_FLASH=1` keeps them; off in
+  NFSU2_NATIVE_VP6=2. `RECOMP_VK_CUBE=0` turns the car reflections off.
+- **Version** (CMakeLists.txt `NFSU2_SWITCH_VERSION`) is a plain variable
+  since 0.5: as a CACHE default the 0.4.5 NRO still said 0.4.3.
 - (Before the FFmpeg decoder) movie decoding ran on the game thread: MMX IDCT `sub_0026EB34`, YUV->RGB
   `sub_0025ECB4`, `sub_0026FBB1` (Linux perf of the movies). The translator
   keeps registers of MMX *leaf* functions in shadowing C locals
@@ -721,5 +776,5 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   slow (APU clock losing time + decoder cost); APU clock fixed and confirmed
   at 1500 frames/s, decoder speed-up awaiting a hardware test.
 - Audio plays on Linux (2026-09-29); Switch audio awaiting a test.
-- Open: cube maps, bump/dot-product texture modes (dependent AR/GB done),
+- Open: cube maps on GL (done on VK), bump/dot-product texture modes (dependent AR/GB done),
   fixed-function lighting, APU performance on Switch.
