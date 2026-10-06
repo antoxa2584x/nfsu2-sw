@@ -281,12 +281,69 @@ int main(int argc, char **argv)
     switch_shutdown();
     return rc;
 }
-#else
+#elif !defined(__APPLE__)
 int main(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
     return game_main();
+}
+#endif
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include <pthread.h>
+#include <unistd.h>
+/* Cocoa belongs to the process' main thread: the SDL window has to be
+ * created there, events have to be pumped there (the executor thread would
+ * otherwise own NSApp), and without that pump the layer never shows a
+ * frame -- which is how a port ends up with sound but a black screen. So
+ * the title runs on a worker with a desktop-sized stack and main drives
+ * SDL. The renderer is built on main before the title starts: ready() is
+ * lazy everywhere else and would land on the executor thread. */
+static volatile int s_game_done;
+static int s_game_rc;
+
+static void *game_thread(void *arg)
+{
+    (void)arg;
+    s_game_rc = game_main();
+    s_game_done = 1;
+    return NULL;
+}
+
+int main(int argc, char **argv)
+{
+    pthread_attr_t attr;
+    pthread_t th;
+#if defined(NFSU2_VULKAN)
+    void nv2a_vk_pump(void);
+#endif
+
+    (void)argc;
+    (void)argv;
+#if defined(NFSU2_VULKAN)
+    {
+        const char *gl = getenv("NFSU2_GL");
+        if (!gl || strcmp(gl, "0") != 0) {
+            int nv2a_vk_ready(void);
+            nv2a_vk_ready();            /* window + device, on this thread */
+        }
+    }
+#endif
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16u * 1024 * 1024);
+    if (pthread_create(&th, &attr, game_thread, NULL) != 0) {
+        fprintf(stderr, "[FATAL] cannot start the game thread\n");
+        return 1;
+    }
+    while (!s_game_done) {
+#if defined(NFSU2_VULKAN)
+        nv2a_vk_pump();
+#endif
+        usleep(2000);
+    }
+    pthread_join(th, NULL);
+    return s_game_rc;
 }
 #endif
 

@@ -365,5 +365,6 @@ void xbox_FramebufferWindowStart(void)
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch) { (void)fb_va; (void)pitch; }
 void xbox_FramebufferWindowPresent(uint32_t fb_va, uint32_t pitch) { (void)fb_va; (void)pitch; }
 void xbox_FramebufferWindowStart(void) {}
-int xbox_FramebufferKeyDown(int vk) { (void)vk; return 0; }
+/* xbox_FramebufferKeyDown is not here: elsewhere the keys come from SDL,
+ * and the input layer provides it (xinput_device.c). */
 #endif

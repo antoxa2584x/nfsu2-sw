@@ -90,28 +90,63 @@ if(WIN32)
         target_link_options(${PROJECT_NAME} PRIVATE /LARGEADDRESSAWARE)
         target_compile_options(${PROJECT_NAME} PRIVATE /bigobj)
     endif()
-else()
-    # The generated chunks are huge straight-line functions; -O1 keeps GCC's
-    # memory and time per chunk sane while still allocating registers. The
-    # Switch's CPU is the bottleneck there, so it gets -O2.
-    if(NINTENDO_SWITCH)
-        set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
-    else()
-        set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
-    endif()
-    # NFSU2_LTO: link-time optimisation of the lifted code and its manual
-    # overrides, so lifted callers inline each other and the native leaves
-    # (_ftol2, ...). The runtime and renderers are compiled as usual.
-    # NFSU2_LTO_JOBS parallel LTRANS jobs (memory: ~1-2 GB each).
-    option(NFSU2_LTO "Link-time optimisation of the lifted code" OFF)
-    set(NFSU2_LTO_JOBS "4" CACHE STRING "Parallel LTO link jobs")
-    set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+elseif(APPLE)
+    # Apple settings for macOS (Optimisation similar to Linux but adjustable for Apple Silicon)
+    set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
     if(NFSU2_LTO)
         list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
         set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
             COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
         target_link_options(${PROJECT_NAME} PRIVATE
             "-flto=${NFSU2_LTO_JOBS}" "-flto-partition=balanced" ${NFSU2_GEN_OPT})
+    endif()
+    set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+    if(NFSU2_LTO)
+        list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
+    endif()
+    set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
+    target_link_libraries(${PROJECT_NAME} PRIVATE m)
+    # Vulkan discovery for MoltenVK (when NFSU2_VULKAN=ON)
+    if(NFSU2_VULKAN)
+        # Homebrew-installed MoltenVK provides Vulkan SDK
+        find_package(Vulkan REQUIRED)
+        if(Vulkan_FOUND)
+            target_include_directories(${PROJECT_NAME} PRIVATE ${Vulkan_INCLUDE_DIRS})
+            target_link_libraries(${PROJECT_NAME} PRIVATE ${Vulkan_LIBRARIES})
+        else()
+            message(FATAL_ERROR "Vulkan not found! Ensure MoltenVK is installed via 'brew install molten-vk'")
+        endif()
+    endif()
+elseif(NINTENDO_SWITCH)
+    set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
+    if(NFSU2_LTO)
+        list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
+        set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
+            COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
+        target_link_options(${PROJECT_NAME} PRIVATE
+            "-flto=${NFSU2_LTO_JOBS}" "-flto-partition=balanced" ${NFSU2_GEN_OPT})
+    endif()
+    set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+    if(NFSU2_LTO)
+        list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
+    endif()
+    set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")
+    target_link_libraries(${PROJECT_NAME} PRIVATE m)
+else()
+    # Linux settings (existing)
+    set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
+    if(NFSU2_LTO)
+        list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
+        set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
+            COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
+        target_link_options(${PROJECT_NAME} PRIVATE
+            "-flto=${NFSU2_LTO_JOBS}" "-flto-partition=balanced" ${NFSU2_GEN_OPT})
+    endif()
+    set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
+    if(NFSU2_LTO)
+        list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
     endif()
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES
         COMPILE_OPTIONS "${NFSU2_GEN_FLAGS}")

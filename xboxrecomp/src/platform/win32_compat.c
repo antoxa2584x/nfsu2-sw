@@ -884,15 +884,14 @@ void xbox_guest_pin(int interrupt)
         svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
 #else
     {
-        cpu_set_t set;
-        CPU_ZERO(&set);
-        CPU_SET(core, &set);
-        pthread_setaffinity_np(pthread_self(), sizeof set, &set);
-        (void)interrupt;
-    }
+        {
+            /* Thread affinity not supported on macOS; skip */
+            (void)core; (void)interrupt;
+        }
 #endif
 }
 
+}
 /* A runtime thread whose deadlines are audible (the APU frame thread): above
  * the guest threads on Horizon (0x2C < 59). Priority 59 is the only one that
  * time-slices, so there it waited behind whatever shared its core, in 10 ms
