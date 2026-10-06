@@ -3473,6 +3473,65 @@ static void dump_surface(VkSurf *s, const char *path)
     vkFreeMemory(s_dev, mem, NULL);
 }
 
+#if !defined(__SWITCH__)
+void xbox_KeyState(int scancode, int down);  /* xinput_device.c */
+void xbox_KeyClear(void);
+
+/* F1: the keyboard map, as a native dialog. */
+static void show_key_help(void)
+{
+    static const char map[] =
+        "Flechas ............. d-pad\n"
+        "Enter ............... START\n"
+        "Backspace ........... BACK\n"
+        "Z X A S ............. A   B   X   Y\n"
+        "Q E ................. White / Black\n"
+        "1 3 ................. gatillos L / R\n"
+        "Numpad 8 2 4 6 ...... stick izquierdo (o teclas 8 2 4 6)\n"
+        "I K J L ............. stick derecho\n"
+        "Shift / Ctrl ........ stick izquierdo / derecho (boton)\n"
+        "\n"
+        "RECOMP_KEYBOARD=1 activa el teclado, =0 lo desactiva.\n"
+        "RECOMP_KEY_TRACE=1 lista las teclas que llegan a la ventana.";
+
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Teclado - NFSU2", map, s_win);
+}
+
+/* The window's events, in one place: close (the X), F1, RECOMP_KEY_TRACE.
+ * Called from the process' main thread on macOS (nv2a_vk_pump) and from
+ * the flip elsewhere -- Cocoa only lets the first touch them. */
+static void pump_events(void)
+{
+    static int trace = -1;
+    SDL_Event e;
+
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT ||
+            (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_CLOSE)) {
+            fprintf(stderr, "[VK] window closed\n");
+            fflush(stderr);
+            exit(0);
+        }
+        if (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP)
+            xbox_KeyState((int)e.key.keysym.scancode, e.type == SDL_KEYDOWN);
+        else if (e.type == SDL_WINDOWEVENT &&
+                 e.window.event == SDL_WINDOWEVENT_FOCUS_LOST)
+            xbox_KeyClear();            /* never leave a key stuck down */
+        if (trace < 0) {
+            const char *t = getenv("RECOMP_KEY_TRACE");
+            trace = (t && *t && *t != '0') ? 1 : 0;
+        }
+        if (trace && (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP))
+            fprintf(stderr, "  [KEY] %s%s %s\n",
+                    e.type == SDL_KEYDOWN ? "down " : "up   ",
+                    e.key.repeat ? "rep " : "    ",
+                    SDL_GetScancodeName(e.key.keysym.scancode));
+        if (e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.sym == SDLK_F1)
+            show_key_help();
+    }
+}
+#endif
+
 static void vk_flip(void)
 {
     static int dump_every = -1;
@@ -3677,10 +3736,8 @@ static void vk_flip(void)
     VT("flip %u: next frame recording\n", s_frame);
     s_dyn_valid = 0;
 #if !defined(__SWITCH__) && !defined(__APPLE__)
-    if (s_win) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) { }
-    }
+    if (s_win)
+        pump_events();
 #endif
 }
 
@@ -3716,9 +3773,7 @@ int nv2a_vk_ready(void)
 void nv2a_vk_pump(void)
 {
 #if !defined(__SWITCH__)
-    if (s_win) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) { }
-    }
+    if (s_win)
+        pump_events();
 #endif
 }

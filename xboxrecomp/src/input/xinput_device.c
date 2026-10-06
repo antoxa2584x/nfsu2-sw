@@ -25,10 +25,10 @@
  * The whole point of a recompilation is to be able to look at the thing
  * running, and a build nobody can press a button in cannot be looked at.
  *
- * Off by default, because a keyboard silently acting as player 1 is
- * surprising when a real pad is what you meant to use. RECOMP_KEYBOARD=1
- * turns it on. It only ever answers for port 0, and is merged on top of a
- * pad connected there, so a real controller keeps working.
+ * On by default, RECOMP_KEYBOARD=0 to turn it off. It is merged on top of
+ * whatever pad is on port 0 rather than replacing it, so with no key held
+ * it does nothing and a real controller keeps working. It only ever
+ * answers for port 0.
  *
  * The keys are the ones a Dreamcast or Saturn emulator would pick, which is
  * the closest thing to a convention here:
@@ -38,15 +38,17 @@
  *   Q E           white black       1 3        triggers
  *   numpad 8/2/4/6 left thumb       I/K/J/L    right thumb
  *
- * Keys come from the framebuffer window, which only receives them while it
- * has the focus, so typing in another window does not drive the game.
+ * Keys come from the window that has the focus, so typing in another
+ * application does not drive the game: xbox_FramebufferKeyDown reads the
+ * framebuffer window on Windows and SDL's keyboard state elsewhere (F1
+ * shows this table; RECOMP_KEY_TRACE=1 logs every key that arrives).
  */
 static BOOL keyboard_enabled(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *v = getenv("RECOMP_KEYBOARD");
-        on = (v && *v && *v != '0') ? 1 : 0;
+        on = (!v || !*v || *v != '0') ? 1 : 0;
     }
     return on ? TRUE : FALSE;
 }
@@ -160,6 +162,11 @@ static void merge_keyboard(XBOX_INPUT_STATE *pState)
 
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS] = { FALSE };
 static DWORD g_last_packet[XBOX_MAX_CONTROLLERS] = { 0 };
+
+/* The window pump's key events go to the SDL side; here the framebuffer
+ * window records the keys itself (fb_present.c). */
+void xbox_KeyState(int scancode, int down) { (void)scancode; (void)down; }
+void xbox_KeyClear(void) { }
 
 
 void xbox_InputInit(void)
@@ -279,26 +286,39 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
 
 #include <SDL.h>
 
-/* Where the keys come from on this side: SDL's keyboard state, which the
- * window keeps up to date by pumping events (the main loop on macOS, the
- * flip on Linux). Only the focused window produces them, so typing in
- * another application does not drive the title.
+/* Where the keys come from on this side: the window's own event pump,
+ * which records every key as it arrives (xbox_KeyState, called by the
+ * renderer's pump) and forgets them when the window loses the focus.
+ * SDL's keyboard state is read too, as a second opinion for pumps that do
+ * not report (the GL renderer's). Only the focused window produces
+ * events, so typing in another application does not drive the title.
  *
  * The VK codes are Windows' (win32_compat.h), so the table in
  * keyboard_state() above reads the same on every platform. The keypad keys
  * also answer on the number row: most laptops have no numeric keypad, and
  * 2/4/6/8 are unused there (1 and 3 are the triggers). */
+static volatile unsigned char s_key_down[SDL_NUM_SCANCODES];
+
+void xbox_KeyState(int scancode, int down)
+{
+    if (scancode > 0 && scancode < SDL_NUM_SCANCODES)
+        s_key_down[scancode] = down ? 1 : 0;
+}
+
+void xbox_KeyClear(void)
+{
+    int i;
+    for (i = 0; i < SDL_NUM_SCANCODES; i++)
+        s_key_down[i] = 0;
+}
+
 int xbox_FramebufferKeyDown(int vk)
 {
     const Uint8 *k;
     SDL_Scancode sc[3];
     int n = 0, i;
 
-    if (!SDL_WasInit(0))                 /* no subsystem, no keyboard */
-        return 0;
-    k = SDL_GetKeyboardState(NULL);
-    if (!k)
-        return 0;
+    k = (SDL_WasInit(0) != 0) ? SDL_GetKeyboardState(NULL) : NULL;
     switch (vk) {
     case VK_BACK:    sc[n++] = SDL_SCANCODE_BACKSPACE; break;
     case VK_RETURN:  sc[n++] = SDL_SCANCODE_RETURN; sc[n++] = SDL_SCANCODE_KP_ENTER; break;
@@ -323,7 +343,7 @@ int xbox_FramebufferKeyDown(int vk)
             return 0;
     }
     for (i = 0; i < n; i++)
-        if (k[sc[i]])
+        if (s_key_down[sc[i]] || (k && k[sc[i]]))
             return 1;
     return 0;
 }
