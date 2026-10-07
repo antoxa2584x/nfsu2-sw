@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the NFSU2 (Xbox) recompilation as a Switch homebrew NRO and stage an
-# SD-card layout:
+# SD-card layout (platform/switch/build.sh):
 #
 #   <SD>/switch/nfsu2x/nfsu2x.nro
 #   <SD>/switch/nfsu2x/game/        the extracted disc: default.xbe, NFSUNDER/, ...
@@ -31,7 +31,7 @@
 #                    it the lifted (slow) decoder plays them.
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 TK="${XBOXRECOMP_DIR:-$REPO/xboxrecomp}"
 GEN="${NFSU2_GEN_DIR:-/root/nfsu2x/gen}"

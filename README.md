@@ -73,23 +73,34 @@ NFSU2_XBE=/path/to/game/default.xbe NFSU2_GEN_DIR=/path/to/gen tools/regen.sh
 </details>
 
 <details open>
-<summary><b>2a. Linux</b> (SDL2 + OpenGL or Vulkan)</summary>
+<summary><b>2a. Linux</b> (SDL2, Vulkan or OpenGL)</summary>
 
 ```sh
-cmake -S . -B build -G Ninja -DNFSU2_GEN_DIR=/path/to/gen   # add -DNFSU2_VULKAN=ON for Vulkan
-cmake --build build
+platform/linux/build.sh          # BUILD_DIR, JOBS, VULKAN=0, FFMPEG_DIR
 NFSU2_GAME_DIR=/path/to/game build/nfsu2_recomp
 ```
 
 </details>
 
 <details open>
-<summary><b>2b. Nintendo Switch</b> (devkitA64, switch-sdl2, switch-mesa)</summary>
+<summary><b>2b. macOS</b> (Apple Silicon or Intel, Vulkan on MoltenVK)</summary>
 
 ```sh
-NFSU2_GEN_DIR=/path/to/gen NFSU2_GAME_SRC=/path/to/game switch/build.sh
+brew install cmake molten-vk vulkan-loader sdl2 openssl@3 glslang spirv-tools
+platform/macos/build.sh          # BUILD_DIR, JOBS, VULKAN=0, FFMPEG_DIR
+NFSU2_GAME_DIR=/path/to/game build/nfsu2_recomp
+# or nothing at all: a data/ directory next to the executable
+```
+
+</details>
+
+<details open>
+<summary><b>2c. Nintendo Switch</b> (devkitA64, switch-sdl2, switch-mesa)</summary>
+
+```sh
+NFSU2_GEN_DIR=/path/to/gen NFSU2_GAME_SRC=/path/to/game platform/switch/build.sh
 # Vulkan build (needs mesa-switch NVK and glslang for Switch)
-VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
+VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen NFSU2_GAME_SRC=/path/to/game platform/switch/build.sh
 ```
 
 </details>
@@ -104,7 +115,7 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 | `config/seed_functions.json` | entry points the static pass cannot see |
 | `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A renderers (Vulkan, OpenGL), SDL audio, Switch platform layer, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
-| `switch/build.sh` | Switch NRO build + SD-card staging |
+| `platform/` | Per-platform build scripts: `platform/linux/build.sh`, `platform/macos/build.sh`, `platform/switch/build.sh` |
 
 ## ⚙️ Configuration
 
@@ -131,13 +142,13 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_LEAF_LOCALS=0` | Translator: keep MMX leaf-function registers in globals instead of C locals. |
 | `RECOMP_REG_LOCALS=0` | Translator: keep eax..edi/esp in globals instead of C locals. |
 | `RECOMP_X87_LOCALS=0` | Translator: keep the x87 stack top in its global instead of a local. |
-| `NFSU2_GAME_SRC` | `switch/build.sh`: extracted disc to stage (default `/root/nfsu2x/game`). |
-| `SD_ROOT` | `switch/build.sh`: staging SD-card root (default `<repo>/switch_sd`). |
-| `BUILD_DIR` | `switch/build.sh`: build directory (default `/root/nfsu2x/build-switch`, `-vk` with `VULKAN=1`). |
-| `JOBS` | `switch/build.sh`: parallel compile jobs (6 fits `-O2` in RAM). |
-| `VULKAN=1` | `switch/build.sh`: build the Vulkan renderer (`nfsu2x-vulkan.nro`). |
-| `NVK_SDK`, `GLSLANG_DIR` | `switch/build.sh` with `VULKAN=1`: mesa-switch NVK install and Switch glslang. |
-| `FFMPEG_DIR` | `switch/build.sh`: LGPL VP6-only FFmpeg for the movies (`tools/build_ffmpeg_vp6.sh`). |
+| `NFSU2_GAME_SRC` | `platform/switch/build.sh`: extracted disc to stage (default `/root/nfsu2x/game`). |
+| `SD_ROOT` | `platform/switch/build.sh`: staging SD-card root (default `<repo>/switch_sd`). |
+| `BUILD_DIR` | `platform/switch/build.sh`: build directory (default `/root/nfsu2x/build-switch`, `-vk` with `VULKAN=1`). |
+| `JOBS` | `platform/switch/build.sh`: parallel compile jobs (6 fits `-O2` in RAM). |
+| `VULKAN=1` | `platform/switch/build.sh`: build the Vulkan renderer (`nfsu2x-vulkan.nro`). |
+| `NVK_SDK`, `GLSLANG_DIR` | `platform/switch/build.sh` with `VULKAN=1`: mesa-switch NVK install and Switch glslang. |
+| `FFMPEG_DIR` | `platform/switch/build.sh`: LGPL VP6-only FFmpeg for the movies (`tools/build_ffmpeg_vp6.sh`). |
 
 </details>
 

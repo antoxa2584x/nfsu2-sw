@@ -47,7 +47,7 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 
 - Regenerate C: `tools/regen.sh` (`LIFT_ONLY=1` after manual-override edits;
   full run after seed changes). Passes `--mmio-sections DSOUND,XPP`.
-- Switch: `XBOXRECOMP_DIR=/root/nfsu2x/xboxrecomp-pr128 bash switch/build.sh`
+- Switch: `XBOXRECOMP_DIR=/root/nfsu2x/xboxrecomp-pr128 bash platform/switch/build.sh`
   (without `XBOXRECOMP_DIR` it picks the main checkout and fails on OpenSSL).
   The copy step fails with "Permission denied" while Eden has the NRO open.
 - Linux: `cmake --build /root/nfsu2x/build-pr128 -j8`; run with
@@ -262,7 +262,7 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   bindings 0/1, samplers 2..5, Vulkan 0..1 clip z), compiled by glslang on a
   4 MB-stack thread. No threaded submission or loading screen yet.
 - Switch: `VULKAN=1 XBOXRECOMP_DIR=/root/nfsu2x/xboxrecomp-pr128 JOBS=6 bash
-  switch/build.sh` (build dir /root/nfsu2x/build-switch-vk). Links
+  platform/switch/build.sh` (build dir /root/nfsu2x/build-switch-vk). Links
   mesa-switch's static NVK from `/root/nfsu2x/mesa-sdk/usr/local` (commit
   1a8c1a66d6f + StevensND/nfsmw-nx `mesa/mesa-switch-nfsmw.patch`, built in
   /root/nfsu2x/ref/mesa-switch: `. /root/nfsu2x/mesa-extra/env.sh; ninja -C
@@ -472,7 +472,7 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   after FFmpeg; native in recomp_manual.c since 2026-10-01 (bit-exact,
   RECOMP_NATIVE=0 / RECOMP_NATIVE_CHECK=1). FFmpeg is a minimal **LGPL** build, vp6 decoder only
   (`tools/build_ffmpeg_vp6.sh switch|linux` -> /root/nfsu2x/ffmpeg-vp6-*;
-  CMake `-DNFSU2_FFMPEG_DIR`, switch/build.sh `FFMPEG_DIR`). devkitPro's
+  CMake `-DNFSU2_FFMPEG_DIR`, platform/switch/build.sh `FFMPEG_DIR`). devkitPro's
   switch-ffmpeg is `--enable-gpl` -- don't link it. Log: `[movie] VP6: n
   frames, x ms average`. Linux x86 (plain C): ~1 ms/frame.
 - Movies: ealogo, THX_LOGO, PSA, FMVOpening (trailer before Press Start);
@@ -682,7 +682,7 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   skipped it; one run then fell to 4 fps. Seeded in
   config/seed_functions.json (full regen: exactly one function added).
 - **LTO (2026-10-02):** CMake `NFSU2_LTO=ON` (+ `NFSU2_LTO_JOBS`) puts the
-  lifted code and recomp_manual.c through LTO; `LTO=1 bash switch/build.sh`
+  lifted code and recomp_manual.c through LTO; `LTO=1 bash platform/switch/build.sh`
   builds in `<build dir>-lto` and stages `nfsu2x[-vulkan]-lto.nro` next to
   the normal NRO. Cheap: ~3 min, ~2 GB. On its own it inlines almost
   nothing (1.3k of 63k direct calls): lifted functions exceed -O2's
