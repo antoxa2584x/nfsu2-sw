@@ -8,8 +8,8 @@
  *
  * Game data is the extracted disc (default.xbe, NFSUNDER/, B3/). Where it is
  * looked for:
- *   Windows/Linux: $NFSU2_GAME_DIR, else a gamedata/ directory next to the
- *                   executable, else gamedata/ in the working directory,
+ *   Windows/Linux: $NFSU2_GAME_DIR, else a data/ directory next to the
+ *                   executable, else data/ in the working directory,
  *                   else ./game
  *   Switch:        sdmc:/switch/nfsu2x/game
  */
@@ -224,9 +224,9 @@ static int has_game(const char *dir)
     return 1;
 }
 
-/* Where the game data is, without NFSU2_GAME_DIR: a gamedata/ directory
+/* Where the game data is, without NFSU2_GAME_DIR: a data/ directory
  * next to the executable first (so a build can be shipped with the disc
- * beside it and nothing configured), then gamedata/ in the working
+ * beside it and nothing configured), then data/ in the working
  * directory, then the usual ./game. $NFSU2_GAME_DIR always wins. */
 static const char *resolve_game_dir(char *buf, size_t cap)
 {
@@ -269,11 +269,11 @@ static const char *resolve_game_dir(char *buf, size_t cap)
         dir[i] = 0;
         if (i > 0 && (dir[i - 1] == '/' || dir[i - 1] == '\\'))
             dir[--i] = 0;               /* "build/" -> "build", "/" -> "" */
-        if (snprintf(buf, cap, "%s/gamedata", dir) < (int)cap && has_game(buf))
+        if (snprintf(buf, cap, "%s/data", dir) < (int)cap && has_game(buf))
             return buf;
     }
-    if (has_game("gamedata")) {
-        snprintf(buf, cap, "gamedata");
+    if (has_game("data")) {
+        snprintf(buf, cap, "data");
         return buf;
     }
     return NFSU2_DEFAULT_GAME_DIR;
@@ -476,7 +476,7 @@ static int game_main(void)
     if (!xbe_data) {
         fprintf(stderr, "cannot read %s\n", xbe_path);
         fatal("Failed to load default.xbe. Put the extracted disc in a "
-              "gamedata directory next to the executable (or in ./game), "
+              "data directory next to the executable (or in ./game), "
               "or set NFSU2_GAME_DIR.");
         return 1;
     }
