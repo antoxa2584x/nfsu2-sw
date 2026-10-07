@@ -13,6 +13,13 @@
 # Optional, for the movies instead of the slow lifted VP6 decoder:
 #   tools/build_ffmpeg_vp6.sh mac   (LGPL, VP6 only)
 #
+# Usage:
+#   platform/macos/build.sh [GAME_DIR]
+#
+#   GAME_DIR   the extracted disc (a directory with default.xbe): build, then
+#              start the game with NFSU2_GAME_DIR=GAME_DIR. Everything.
+#   no argument  build only, then print the command to run.
+#
 # Environment:
 #   BUILD_DIR       default <repo>/build
 #   JOBS            parallel compile jobs (default: hw.ncpu)
@@ -23,7 +30,7 @@
 #                   build with sound and no picture.
 #   FFMPEG_DIR      VP6-only FFmpeg (default <repo>/../ffmpeg-vp6-mac)
 #
-# At run time the disc is $NFSU2_GAME_DIR, else a data/ directory next to
+# At run time the disc is $NFSU2_GAME_DIR, else a game/ directory next to
 # the executable (default.xbe, NFSUNDER/, B3/), else ./game.
 set -euo pipefail
 
@@ -41,6 +48,22 @@ fail() { echo "error: $*" >&2; exit 1; }
 if [ "$(uname -s)" = "Darwin" ]; then
     HPREFIX="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
     export PKG_CONFIG_PATH="$HPREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+fi
+
+usage() {
+    echo "usage: ${0##*/} [GAME_DIR]"
+    echo "  GAME_DIR    the extracted disc (a directory with default.xbe):"
+    echo "              build, then start the game with NFSU2_GAME_DIR pointing at it"
+    echo "  no argument build only, then print how to run"
+    exit "${1:-0}"
+}
+case "${1:-}" in
+    -h|--help) usage 0 ;;
+    -*) echo "error: unknown option $1" >&2; usage 1 ;;
+esac
+GAME="${1:-}"
+if [ -n "$GAME" ]; then
+    [ -f "$GAME/default.xbe" ] || fail "$GAME has no default.xbe (point at the extracted disc)"
 fi
 
 command -v cmake >/dev/null || fail "cmake not found (brew install cmake)"
@@ -70,6 +93,24 @@ cmake --build "$BUILD" -j"$JOBS"
 
 echo
 echo "built $BUILD/nfsu2_recomp"
-echo "  NFSU2_GAME_DIR=/path/to/disc $BUILD/nfsu2_recomp"
-echo "  or drop a data/ directory (default.xbe, NFSUNDER/, B3/) next to the"
-echo "  executable and run it with no environment at all."
+
+if [ -n "$GAME" ]; then
+    echo "starting it with NFSU2_GAME_DIR=$GAME"
+    NFSU2_GAME_DIR="$GAME" exec "$BUILD/nfsu2_recomp"
+fi
+
+# Build only: say how to run it, with the disc it would find on its own
+# (the same lookup the binary does: $NFSU2_GAME_DIR, game/ next to it,
+# then ./game in the working directory).
+found=""
+for d in "$BUILD/game" "$PWD/game"; do
+    if [ -f "$d/default.xbe" ]; then found="$d"; break; fi
+done
+if [ -n "${NFSU2_GAME_DIR:-}" ]; then
+    echo "run:  NFSU2_GAME_DIR=$NFSU2_GAME_DIR $BUILD/nfsu2_recomp"
+elif [ -n "$found" ]; then
+    echo "run:  $BUILD/nfsu2_recomp     (it picks up $found)"
+else
+    echo "run:  ${0##*/} /path/to/game   (builds and starts)"
+    echo "      or put the extracted disc in a game/ directory next to the binary"
+fi

@@ -8,9 +8,8 @@
  *
  * Game data is the extracted disc (default.xbe, NFSUNDER/, B3/). Where it is
  * looked for:
- *   Windows/Linux: $NFSU2_GAME_DIR, else a data/ directory next to the
- *                   executable, else data/ in the working directory,
- *                   else ./game
+ *   Windows/Linux: $NFSU2_GAME_DIR, else game/ next to the executable,
+ *                   else ./game in the working directory
  *   Switch:        sdmc:/switch/nfsu2x/game
  */
 
@@ -224,10 +223,10 @@ static int has_game(const char *dir)
     return 1;
 }
 
-/* Where the game data is, without NFSU2_GAME_DIR: a data/ directory
- * next to the executable first (so a build can be shipped with the disc
- * beside it and nothing configured), then data/ in the working
- * directory, then the usual ./game. $NFSU2_GAME_DIR always wins. */
+/* Where the game data is, without NFSU2_GAME_DIR: a game/ directory next to
+ * the executable first (so a build can be shipped with the disc beside it
+ * and nothing configured), then ./game in the working directory, which is
+ * the original default. $NFSU2_GAME_DIR always wins. */
 static const char *resolve_game_dir(char *buf, size_t cap)
 {
     const char *env = getenv("NFSU2_GAME_DIR");
@@ -269,14 +268,10 @@ static const char *resolve_game_dir(char *buf, size_t cap)
         dir[i] = 0;
         if (i > 0 && (dir[i - 1] == '/' || dir[i - 1] == '\\'))
             dir[--i] = 0;               /* "build/" -> "build", "/" -> "" */
-        if (snprintf(buf, cap, "%s/data", dir) < (int)cap && has_game(buf))
+        if (snprintf(buf, cap, "%s/game", dir) < (int)cap && has_game(buf))
             return buf;
     }
-    if (has_game("data")) {
-        snprintf(buf, cap, "data");
-        return buf;
-    }
-    return NFSU2_DEFAULT_GAME_DIR;
+    return NFSU2_DEFAULT_GAME_DIR;          /* ./game in the working directory */
 }
 #endif
 
@@ -476,8 +471,8 @@ static int game_main(void)
     if (!xbe_data) {
         fprintf(stderr, "cannot read %s\n", xbe_path);
         fatal("Failed to load default.xbe. Put the extracted disc in a "
-              "data directory next to the executable (or in ./game), "
-              "or set NFSU2_GAME_DIR.");
+              "game directory next to the executable (or in the working "
+              "directory), or set NFSU2_GAME_DIR.");
         return 1;
     }
     printf("XBE %s: %zu bytes\n", xbe_path, xbe_size);

@@ -2,18 +2,19 @@
 
 <img src="https://cdn2.steamgriddb.com/logo/4b29fa4efe4fb7bc667c7b301b74d52d.png" alt="Need for Speed: Underground 2" width="520">
 
-### Xbox static recompilation for Nintendo Switch and Linux
+### Xbox static recompilation for Nintendo Switch, macOS and Linux
 
 The original Xbox (NTSC-U) release of **Need for Speed: Underground 2**, lifted
 instruction by instruction to C and running natively, with no emulator.
 
 ![Switch](https://img.shields.io/badge/Nintendo%20Switch-homebrew-E60012?logo=nintendoswitch&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
 ![Version](https://img.shields.io/badge/version-0.5-blue)
 
-[Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
+[Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Playing on macOS](#-playing-on-macos) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
 
 </div>
 
@@ -27,8 +28,8 @@ instruction by instruction to C and running natively, with no emulator.
 
 - 🏁 **Native code**: the whole game runs as recompiled C, built with
   [xboxrecomp](https://github.com/sp00nznet/xboxrecomp)
-- 🎮 **Two renderers**: Vulkan (NVK on Switch) and OpenGL, with render scaling
-  up to 4x
+- 🎮 **Two renderers**: Vulkan (NVK on Switch, MoltenVK on macOS) and OpenGL,
+  with render scaling up to 4x
 - 📺 **Widescreen 16:9** by default, using the game's own wide mode
 - 🎬 **Full-screen movies** decoded with FFmpeg (VP6)
 - 🔊 **Audio** through an emulated Xbox APU, with 5.1 downmixed to stereo
@@ -37,6 +38,8 @@ instruction by instruction to C and running natively, with no emulator.
 - 📳 **Rumble** on Switch HD rumble and SDL controllers
 - 🔤 **Switch wording** in the menus (Start → `+`, no Xbox Live or hard-disk
   names)
+- ⌨️ **Keyboard as a pad** on macOS and Linux when no controller is connected
+  (on by default; F1 shows the key map)
 - 💾 Saves stay next to the game in `game/UDATA`
 
 ## 🕹️ Playing on Switch
@@ -60,6 +63,42 @@ Buttons map by label (Switch A = Xbox A). Settings go in `nfsu2x_env.txt`
 (see [Configuration](#%EF%B8%8F-configuration)) and the log is written to the
 same folder.
 
+## 🕹️ Playing on macOS
+
+```sh
+platform/macos/build.sh /path/to/game     # compila y arranca
+```
+
+Eso es todo: compila `build/nfsu2_recomp` y lo arranca con
+`NFSU2_GAME_DIR` apuntando a tu disco. Sin argumentos solo compila, y el
+binario entonces encuentra el disco solo, en este orden:
+
+1. `NFSU2_GAME_DIR=...`
+2. un directorio `game/` junto al ejecutable, con `default.xbe`,
+   `NFSUNDER/` y `B3/` — sin necesidad de ninguna variable
+3. `./game` en el directorio de trabajo
+
+The window is created on the process' main thread and closes with its **X**.
+Without a controller the **keyboard is player 1** (on by default;
+`RECOMP_KEYBOARD=0` turns it off, and it merges with a real pad when there is
+one):
+
+| Key | Xbox |
+|---|---|
+| arrows | d-pad |
+| Enter | START |
+| Backspace | BACK |
+| Z X A S | A B X Y |
+| Q E | White / Black |
+| 1 3 | L / R triggers |
+| numpad 8 2 4 6 (or the number row) | left stick |
+| I K J L | right stick |
+| Shift / Ctrl | left / right stick button |
+
+**F1** shows this table in a dialog. `RECOMP_KEY_TRACE=1` logs every key as it
+arrives — the useful first check when a key seems dead: the window has to have
+the focus.
+
 ## 🛠️ Building
 
 <details open>
@@ -76,8 +115,9 @@ NFSU2_XBE=/path/to/game/default.xbe NFSU2_GEN_DIR=/path/to/gen tools/regen.sh
 <summary><b>2a. Linux</b> (SDL2, Vulkan or OpenGL)</summary>
 
 ```sh
-platform/linux/build.sh          # BUILD_DIR, JOBS, VULKAN=0, FFMPEG_DIR
-NFSU2_GAME_DIR=/path/to/game build/nfsu2_recomp
+platform/linux/build.sh /path/to/game     # compila y arranca
+platform/linux/build.sh                   # solo compila, y dice cómo arrancarlo
+# BUILD_DIR, JOBS, VULKAN=0, FFMPEG_DIR
 ```
 
 </details>
@@ -104,11 +144,14 @@ Needs:
   `tools/build_ffmpeg_vp6.sh mac`, then `FFMPEG_DIR`
 
 ```sh
-platform/macos/build.sh          # BUILD_DIR, JOBS, NFSU2_GEN_DIR, VULKAN=0, FFMPEG_DIR
-NFSU2_GAME_DIR=/path/to/game build/nfsu2_recomp
-# or nothing at all: a data/ directory (default.xbe, NFSUNDER/, B3/) next
-# to the executable
+platform/macos/build.sh /path/to/game     # compila y arranca
+platform/macos/build.sh                   # solo compila, y dice cómo arrancarlo
+# BUILD_DIR, JOBS, NFSU2_GEN_DIR, VULKAN=0, FFMPEG_DIR
 ```
+
+Without arguments the binary finds the disc on its own: `$NFSU2_GAME_DIR`,
+else a `game/` directory (`default.xbe`, `NFSUNDER/`, `B3/`) next to the
+executable, else `./game` in the working directory.
 
 The renderer is Vulkan on MoltenVK. `VULKAN=0` builds the GL renderer,
 which has no window path on macOS yet: it leaves you with sound and no
@@ -141,7 +184,7 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen NFSU2_GAME_SRC=/path/to/game platform
 
 ## ⚙️ Configuration
 
-On Linux these are ordinary environment variables. On the Switch they go in
+On Linux and macOS these are ordinary environment variables. On the Switch they go in
 `sdmc:/switch/nfsu2x/nfsu2x_env.txt`, one `KEY=VALUE` per line (`#` starts a
 comment). Anything left out runs at its default, which is the fastest normal
 configuration. Most of the list is for debugging, so the sections below are folded.
@@ -179,7 +222,7 @@ RECOMP_WIDESCREEN=0
 
 | Variable | Meaning |
 |---|---|
-| `NFSU2_GAME_DIR` | Where the extracted disc is at run time: this variable, else a `data/` directory next to the executable (`default.xbe`, `NFSUNDER/`, `B3/`), else `./game`. The Switch is always `sdmc:/switch/nfsu2x/game/`. |
+| `NFSU2_GAME_DIR` | Where the extracted disc is at run time: this variable, else a `game/` directory next to the executable (`default.xbe`, `NFSUNDER/`, `B3/`), else `./game` in the working directory. The Switch is always `sdmc:/switch/nfsu2x/game/`. |
 | `NFSU2_GL=0` | Use the executor's CPU renderer instead of the GPU renderer. |
 | `NFSU2_APU=0` | With `RECOMP_AC97_READY=plain`: no emulated APU (no sound). |
 | `NFSU2_SIM_STEPS` | Longest game-time step per frame, in 1/60 s (default 6 = 100 ms; 3 = the original 50 ms cap, which slows races below 20 fps). |
@@ -324,6 +367,7 @@ RECOMP_WIDESCREEN=0
 | Platform | State |
 |---|---|
 | 🐧 Linux | Boot, movies, profile, Main Menu, Quick Race and Career, with audio |
+| 🍎 macOS (M1 Pro, MoltenVK) | Boot, movies, title screen, with a window, keyboard and F1; races not tested on macOS yet |
 | 🎮 Switch hardware | Boot, movies, profile load/create, Main Menu, races |
 
 Still open: cube maps on OpenGL (Vulkan has them: car reflections), bump/dot-product texture modes, fixed-function
