@@ -294,7 +294,7 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_PAD_LAYOUT=position` | Map buttons by position (Xbox layout) instead of by label. |
 | `RECOMP_PAD_SCRIPT`, `RECOMP_PAD2_SCRIPT` | Timed presses, e.g. `4000:start:300,9000:a:200` (ms from the first pad read). |
 | `RECOMP_PAD_PRESS=<mask>` | Press these buttons periodically. |
-| `RECOMP_KEYBOARD=1` | Keyboard as a pad (Linux). |
+| `RECOMP_KEYBOARD=0` | Keyboard as a pad for port 0 — **on by default** on macOS and Linux, merged over the pad so with no key held it does nothing (arrows = d-pad, Enter = START, Z X A S = A B X Y, numpad 8 2 4 6 or the number row = left stick, I K J L = right stick). **F1** shows that table in a dialog. |
 | `RECOMP_RUMBLE=0` | No rumble. |
 | `RECOMP_RUMBLE_TRACE=1`, `RECOMP_INPUT_DIAG=1`, `RECOMP_KEY_TRACE=1`, `RECOMP_USB_TRACE=1` | Input debugging traces. |
 
