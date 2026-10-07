@@ -6,7 +6,10 @@
 #   cmake configure + build  ->  $BUILD_DIR/nfsu2_recomp
 #
 # Needs (Homebrew):
-#   brew install cmake molten-vk vulkan-loader sdl2 openssl@3 glslang spirv-tools
+#   brew install cmake pkg-config molten-vk vulkan-loader sdl2 libepoxy \
+#                openssl@3 glslang spirv-tools
+# (Xcode Command Line Tools: xcode-select --install. libepoxy and pkg-config
+# are required even in the Vulkan build: the D3D8 shim links them.)
 # Optional, for the movies instead of the slow lifted VP6 decoder:
 #   tools/build_ffmpeg_vp6.sh mac   (LGPL, VP6 only)
 #
@@ -32,15 +35,18 @@ GEN="${NFSU2_GEN_DIR:-$REPO/xboxrecomp/gen}"
 
 fail() { echo "error: $*" >&2; exit 1; }
 
-command -v cmake >/dev/null || fail "cmake not found (brew install cmake)"
-[ -f "$GEN/recomp_funcs.h" ] || fail "no generated code in $GEN (run tools/regen.sh, or set NFSU2_GEN_DIR)"
-
 # Homebrew's .pc files (epoxy, sdl2) are outside pkg-config's default path on
-# Apple Silicon, and a clean environment then fails to find epoxy.
+# Apple Silicon, and a clean environment then fails to find epoxy. Before the
+# checks below, so that "pkg-config --exists epoxy" sees them too.
 if [ "$(uname -s)" = "Darwin" ]; then
     HPREFIX="${HOMEBREW_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
     export PKG_CONFIG_PATH="$HPREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 fi
+
+command -v cmake >/dev/null || fail "cmake not found (brew install cmake)"
+command -v pkg-config >/dev/null || fail "pkg-config not found (brew install pkg-config)"
+pkg-config --exists epoxy || fail "epoxy not found (brew install libepoxy)"
+[ -f "$GEN/recomp_funcs.h" ] || fail "no generated code in $GEN (run tools/regen.sh, or set NFSU2_GEN_DIR)"
 
 VK_ARGS=(-DNFSU2_VULKAN=ON)
 if [ "$VK" != "1" ]; then
