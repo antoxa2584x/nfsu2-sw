@@ -484,6 +484,29 @@ def test_default_ownership_does_not_follow_base_only_tables():
     assert subject.owned_function_starts == {BASE + 0x30}
 
 
+def test_ownership_keeps_protected_entries_standalone():
+    subject = ownership_subject()
+    subject.protected_function_starts.add(BASE + 0x30)
+    subject.discover_cfg_ownership()
+    assert not subject.owned_function_starts
+    assert not subject._recovered_cfg
+
+
+def test_ownership_stops_at_a_protected_fallthrough():
+    subject = ownership_subject()
+    # Both table arms now run a nop and fall through into a protected entry
+    # that no branch names.
+    raw = bytearray(subject.xbe_data)
+    raw[0x20:0x22] = b"\x90\xc3"
+    raw[0x104:0x108] = (BASE + 0x20).to_bytes(4, "little")
+    subject.xbe_data = bytes(raw)
+    subject.func_db[BASE + 0x21] = function(BASE + 0x21, BASE + 0x22)
+    subject.protected_function_starts.add(BASE + 0x21)
+    subject.discover_cfg_ownership()
+    assert not subject.owned_function_starts
+    assert not subject._recovered_cfg
+
+
 def test_explicit_coalesced_owner_stays_strong_during_ownership():
     subject = ownership_subject()
     owner = BASE + 0x30

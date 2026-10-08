@@ -60,7 +60,22 @@ def _statement_end(s, i):
     raise ValueError("unterminated statement in generated code")
 
 
+# Accesses the MMIO_* accessors do not cover still see the tiled framebuffer
+# aperture (0xF0000000, a view of the contiguous window). Where the host
+# cannot alias memory (Horizon) nothing is mapped there, so these go through
+# XBOX_DEV_FOLD (recomp_types.h) as well: XBOX_PTR in the block-copy and
+# block-fill forms of rep movs/stos, and the float/double/64-bit accessors.
+# NFS Carbon's D3DX copies surfaces into it with rep movsd.
+_DEV_NAMES = re.compile(r"(?<![A-Za-z0-9_])(XBOX_PTR|MEMF|MEMD|SMEM64)\(")
+
+
 def rewrite(code):
+    """Rewrite every memory access in `code` to its device-aware form."""
+    return _DEV_NAMES.sub(lambda m: {"XBOX_PTR": "XBOX_DEV_PTR("}.get(
+        m.group(1), "DEV_" + m.group(1) + "("), _rewrite_mem(code))
+
+
+def _rewrite_mem(code):
     """Rewrite every MEM8/16/32 and SMEM8/16/32 access in `code`."""
     out = []
     pos = 0
@@ -72,14 +87,14 @@ def rewrite(code):
         out.append(code[pos:m.start()])
         signed, bits = m.group(1), m.group(2)
         args_end = _close_paren(code, m.end())
-        addr = rewrite(code[m.end():args_end - 1])
+        addr = _rewrite_mem(code[m.end():args_end - 1])
         a = _ASSIGN.match(code, args_end)
         if a:
             # A signed accessor as an lvalue (fistp stores through SMEM32)
             # writes the same bits; only a compound op needs the signed read.
             op = a.group(1)
             end = _statement_end(code, a.end())
-            value = rewrite(code[a.end():end].strip())
+            value = _rewrite_mem(code[a.end():end].strip())
             cur = f"MMIO_RD{bits}({addr})"
             if signed:
                 cur = f"(({_SIGNED[bits]}){cur})"

@@ -76,6 +76,9 @@ class FunctionDetector:
 
         # Candidate function starts: address -> (confidence, method)
         self._candidates: Dict[int, Tuple[float, str]] = {}
+        # Call targets that land inside an instruction the sweep decoded
+        # coherently, with no function-shaped bytes there (_pass_call_targets).
+        self._split_call_targets: Set[int] = set()
 
         # Final function list
         self.functions: Dict[int, Function] = {}
@@ -117,6 +120,9 @@ class FunctionDetector:
 
         # Pass 5: Build functions from candidates
         self._build_functions(sections)
+        if self._prune_data_call_targets():
+            self.functions.clear()
+            self._build_functions(sections)
 
         # Pass 6: Tail-jump targets. A function reached only by "jmp" and never
         # by "call" is invisible to every pass above, so it is emitted as a stub
@@ -200,7 +206,23 @@ class FunctionDetector:
             i = bisect.bisect_right(starts, addr) - 1
             return not (i >= 0 and addr < bounds[i][1])
 
+        # Conditional branches into the bytes just below them, by target.
+        # The gap test alone is not enough: a function found by this same
+        # pass (its parent) is not a function yet while its own tails are
+        # tested, so they are still in a gap. NFS Carbon's sub_001A7E00 has a
+        # ret mid-body and its `jne 0x1A7E56` / `je 0x1A7E5C` / `je 0x1A7E67`
+        # lead past it; 0x1A7E56 (`push esi`) became a function, the body was
+        # cut there, and the je to its `pop edi; ret` went to a stub -- the
+        # caller's edi never came back. A function is never entered by a jcc
+        # from the code above it.
+        jcc_from_above: Dict[int, List[int]] = {}
+        for i in self.engine.instructions.values():
+            if (i.is_cond_jump and i.jump_target is not None
+                    and 0 < i.jump_target - i.address < 0x1000):
+                jcc_from_above.setdefault(i.jump_target, []).append(i.address)
+
         added = False
+        found: List[int] = []
         for insn in list(self.engine.instructions.values()):
             if not insn.is_ret:
                 continue
@@ -227,6 +249,17 @@ class FunctionDetector:
             # half -- but those are covered, so they are not in a gap.
             if not (self.engine.probes_as_prologue(nxt)
                     or self.engine.probes_as_constant_stub(nxt)):
+                continue
+            found.append(nxt)
+
+        # A tail of the function above: branched to from a known body, or
+        # from one found here (the nearest of these below it is its parent).
+        found.sort()
+        for nxt in found:
+            k = bisect.bisect_left(found, nxt)
+            parent = found[k - 1] if k else None
+            if any(not in_a_gap(src) or (parent is not None and parent <= src)
+                   for src in jcc_from_above.get(nxt, ())):
                 continue
             self._add_candidate(nxt, config.CONFIDENCE_CC_BOUNDARY,
                                 "gap_prologue")
@@ -406,6 +439,14 @@ class FunctionDetector:
             section = self.image.get_section_at_va(target)
             if not (section and section.executable):
                 continue
+            # A "call" decoded out of data can land in the middle of an
+            # instruction of real code; see _prune_data_call_targets, which
+            # needs the function bodies and so runs after the first build.
+            if (self.engine.instruction_covering(target) is not None
+                    and not (self.engine.probes_as_prologue(target)
+                             or self.engine.probes_as_constant_stub(target)
+                             or self.engine.probes_as_vcall_thunk(target))):
+                self._split_call_targets.add(target)
             # A direct call to an executable address is the strongest evidence
             # of a function start there is -- stronger than a prologue match,
             # which is a guess about bytes. It used to be discarded whenever the
@@ -444,6 +485,48 @@ class FunctionDetector:
         if realigned or unaligned:
             print(f"  Realigned {realigned} call targets the sweep stepped over"
                   f" ({unaligned} rejected: bytes do not decode as a function)")
+
+    def _prune_data_call_targets(self) -> bool:
+        """
+        Drop call-target starts that split a decoded instruction and are
+        called only from outside every function -- calls decoded out of data.
+
+        NFS Carbon's XPP section opens with a driver table; one of its bytes
+        decodes as `call 0x0039E9B0`, the last byte of a `mov eax, [0x4B8B74]`
+        in the USB enumerator sub_0039E8F0. As a function start it cut the
+        enumerator off after its first call, GET_DESCRIPTOR(config) was never
+        sent, and no pad ever enumerated. NFSU2's XNET header has one too
+        (0x003016A2). Targets with a caller inside a real function stay: the
+        sweep decodes out of phase after tables, and a real call landing there
+        is the better evidence (NFSU1 0x0019C4C0, after int3 padding).
+        """
+        if not self._split_call_targets:
+            return False
+        bounds = sorted((f.start, f.end) for f in self.functions.values())
+        starts = [b[0] for b in bounds]
+
+        def inside_a_function(addr: int) -> bool:
+            i = bisect.bisect_right(starts, addr) - 1
+            return i >= 0 and addr < bounds[i][1]
+
+        callers: Dict[int, List[int]] = {}
+        for insn in self.engine.instructions.values():
+            if insn.is_call and insn.call_target in self._split_call_targets:
+                callers.setdefault(insn.call_target, []).append(insn.address)
+        dropped = []
+        for target in sorted(self._split_call_targets):
+            cand = self._candidates.get(target)
+            if not cand or cand[1] != "call_target":
+                continue
+            if any(inside_a_function(a) for a in callers.get(target, [])):
+                continue
+            del self._candidates[target]
+            dropped.append(target)
+        if dropped:
+            print(f"  {len(dropped)} call target(s) dropped: they split an"
+                  f" instruction and are only called from data ("
+                  + ", ".join(f"0x{t:08X}" for t in dropped) + ")")
+        return bool(dropped)
 
     def _pass_indirect_call_slots(self) -> None:
         """
@@ -546,10 +629,23 @@ class FunctionDetector:
         def in_code_section(addr: int) -> bool:
             return any(lo <= addr < hi for lo, hi in code_ranges)
 
+        # D3D's immediates are NV2A pushbuffer words, never game addresses:
+        # `mov [edi], 0x00100A20` is "4 dwords to method 0xA20", and NFSU1's
+        # .text runs through 0x00100A20 -- two such words split sub_001009C0
+        # three ways, its switch lost its range check, and the race load
+        # crashed. The library takes no game function's address by value.
+        d3d_ranges = [(sec.virtual_addr, sec.virtual_addr + sec.virtual_size)
+                      for sec in sections if sec.name.upper() == "D3D"]
+
+        def in_d3d(addr: int) -> bool:
+            return any(lo <= addr < hi for lo, hi in d3d_ranges)
+
         targets = set()
         for insn in self.engine.instructions.values():
             target = insn.imm_ref
             if target is None or target in self.functions:
+                continue
+            if in_d3d(insn.address):
                 continue
             if inside_a_function(target) or not in_code_section(target):
                 continue
@@ -573,8 +669,19 @@ class FunctionDetector:
             # dispatches through the vtable and is gone. Those are taken by
             # address and passed around as values, so an immediate is exactly
             # how they show up.
+            # ...or a short body that tail-jumps into a known function. NFS
+            # Carbon's script native PrecalculateDriftOpponentScores
+            # (0x1A9E70) is `mov ecx, [mgr]; call get; mov ecx, eax; jmp
+            # method`: registered by `push 0x1A9E70` and never called by
+            # name. Refused, the script's call failed to resolve and drift
+            # opponents never scored. Landing on a function start is the
+            # evidence a data-shaped stream cannot fake.
+            tail = self.engine.block_tail_jump(target, max_insns=32)
+            tail_call = tail is not None and (
+                tail in self.functions or tail in self._candidates)
             if not (self.engine.probes_as_returning_body(target)
-                    or self.engine.probes_as_vcall_thunk(target)):
+                    or self.engine.probes_as_vcall_thunk(target)
+                    or tail_call):
                 continue
             if target not in self.engine.instructions:
                 if not self.engine.decode_at(target):
@@ -878,14 +985,38 @@ class FunctionDetector:
         shared tail, which costs a little code size and makes the entry point
         callable. The alternative -- a stub that returns immediately -- silently
         skips the epilogue and leaks the caller's frame.
+
+        An alias in a gap has no enclosing body; its end was "the next known
+        function start", measured before the other aliases existed. A run of
+        gap aliases -- DOA3's C++ dynamic initialisers -- then each spanned the
+        whole run, ~100 KB lifted 25 times, and one alias ran past its section
+        end into data. Measure each one as its own body, then run on to the
+        next function or alias start past that, within its section. Measuring
+        alone stops short at an inline jump table it does not recognise (the
+        CRT's backward memmove); cutting at the very next alias start splits a
+        real gap function at a data-table hit inside it, turning its own
+        branches into calls to stubs.
         """
+        bodies = sorted((f.start, f.end) for f in self.functions.values())
+        body_starts = [b[0] for b in bodies]
+        starts = sorted(set(body_starts) | set(self._alias_entries))
         for addr, end in sorted(self._alias_entries.items()):
             if addr in self.functions:
                 continue
+            section = self.image.get_section_at_va(addr)
+            i = bisect.bisect_right(body_starts, addr) - 1
+            if not (i >= 0 and addr < bodies[i][1]) and section is not None:
+                # Only the backed bytes are code; a virtual tail past them
+                # is zero-filled, and reading on reaches the next section.
+                end = min(end, section.virtual_addr
+                          + min(section.virtual_size, section.raw_size))
+                body_end = self._find_function_end(addr, end, end)
+                k = bisect.bisect_left(starts, max(body_end, addr + 1))
+                if k < len(starts):
+                    end = min(end, starts[k])
             insns = self.engine.get_instructions_in_range(addr, end)
             if not insns:
                 continue
-            section = self.image.get_section_at_va(addr)
             sec_name = section.name if section else ""
             label = self.labels.get(addr)
             name = label.name if label else f"sub_{addr:08X}"

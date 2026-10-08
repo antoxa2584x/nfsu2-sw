@@ -34,8 +34,12 @@ def test_comparison_is_not_a_store():
 
 
 def test_other_accessors_untouched():
-    src = "xmm0 = XMM_MEM(ebp + 8); f = MEMF(eax); SMEM64(eax);"
+    # XMM_MEM is not rewritten; MEMF/SMEM64 get their tiled-aperture folding
+    # forms (test_block_forms_and_wide_accessors_fold_the_tiled_aperture).
+    src = "xmm0 = XMM_MEM(ebp + 8);"
     assert rewrite(src) == src
+    assert rewrite("f = MEMF(eax); SMEM64(eax);") == \
+        "f = DEV_MEMF(eax); DEV_SMEM64(eax);"
 
 
 def test_shift_assign():
@@ -51,3 +55,13 @@ def test_signed_store():
 def test_signed_compound_store():
     assert rewrite("SMEM16(eax) >>= 1;") == \
         "MMIO_WR16(eax, ((int16_t)MMIO_RD16(eax)) >> (1));"
+
+
+def test_block_forms_and_wide_accessors_fold_the_tiled_aperture():
+    # rep movsd's block copy and the float/double/64-bit accessors are not
+    # MMIO_* accesses; they get the folding forms instead.
+    got = rewrite("uint8_t *_d = (uint8_t*)XBOX_PTR(edi); f = MEMF(esi); d = MEMD(ebx); q = SMEM64(ecx);")
+    assert got == ("uint8_t *_d = (uint8_t*)XBOX_DEV_PTR(edi); f = DEV_MEMF(esi);"
+                   " d = DEV_MEMD(ebx); q = DEV_SMEM64(ecx);")
+    # Idempotent: a second pass leaves the folded forms alone.
+    assert rewrite(got) == got
