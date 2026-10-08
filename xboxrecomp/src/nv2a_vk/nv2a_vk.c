@@ -280,6 +280,22 @@ typedef struct {
 static double   s_scale = 1.0;
 static uint32_t s_max_size = 4096;
 
+/* Render scale asked for at run time, in percent (a game option: NFSU2's
+ * Options -> Video); 0 = none, keep RECOMP_GL_SCALE. Applied at the next
+ * flip (rescale_surfaces). */
+volatile int nv2a_vk_scale_pct;
+
+/* The stored size of a w x h surface at the current scale. */
+static void stored_size(uint32_t w, uint32_t h, uint32_t *pw, uint32_t *ph)
+{
+    double k = s_scale, m = (double)(w > h ? w : h);
+    if (m * k > (double)s_max_size)
+        k = (double)s_max_size / m;
+    *pw = (uint32_t)(w * k + 0.5); *ph = (uint32_t)(h * k + 0.5);
+    if (!*pw) *pw = 1;
+    if (!*ph) *ph = 1;
+}
+
 /* v title pixels of a surface l wide, in the p stored pixels behind it. */
 static uint32_t to_stored(uint32_t v, uint32_t p, uint32_t l)
 {
@@ -511,14 +527,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
     memset(s, 0, sizeof *s);
     s->va = va; s->w = w; s->h = h; s->used = s_frame;
     s->aa_sx = aa_sx; s->aa_sy = aa_sy;
-    {
-        double k = s_scale, m = (double)(w > h ? w : h);
-        if (m * k > (double)s_max_size)
-            k = (double)s_max_size / m;
-        s->pw = (uint32_t)(w * k + 0.5); s->ph = (uint32_t)(h * k + 0.5);
-        if (!s->pw) s->pw = 1;
-        if (!s->ph) s->ph = 1;
-    }
+    stored_size(w, h, &s->pw, &s->ph);
     if (!make_image(s->pw, s->ph, VK_FORMAT_B8G8R8A8_UNORM,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -532,6 +541,64 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
         LOGE("surface 0x%08X %ux%u (aa %ux%u, stored %ux%u)\n", va, w, h, aa_sx, aa_sy,
              s->pw, s->ph);
     return s;
+}
+
+/* A new render scale (nv2a_vk_scale_pct), at a flip, outside rendering:
+ * every surface is rebuilt at its new stored size with its pixels scaled
+ * over -- render targets the title keeps across frames (glow accumulators,
+ * reflection faces, the frame being presented) do not go black -- and the
+ * depth buffers are dropped; depth_get makes new ones on the next draw. */
+static void rescale_surfaces(double k)
+{
+    int i, copied = 0;
+
+    s_scale = k;
+    fprintf(stderr, "  [VK] rendering at %gx\n", k);
+    for (i = 0; i < VK_MAX_SURF; i++) {
+        VkSurf *s = &s_surf[i];
+        VkImage img; VkImageView view; VkDeviceMemory mem;
+        VkImageBlit bl;
+        uint32_t pw, ph;
+        if (!s->image)
+            continue;
+        stored_size(s->w, s->h, &pw, &ph);
+        if (pw == s->pw && ph == s->ph)
+            continue;
+        if (!make_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT, &img, &view, &mem)) {
+            LOGE("surface 0x%08X %ux%u: image creation failed\n", s->va, pw, ph);
+            continue;
+        }
+        if (!copied) {
+            barrier_all();
+            copied = 1;
+        }
+        memset(&bl, 0, sizeof bl);
+        bl.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        bl.srcSubresource.layerCount = 1;
+        bl.srcOffsets[1].x = (int32_t)s->pw;
+        bl.srcOffsets[1].y = (int32_t)s->ph;
+        bl.srcOffsets[1].z = 1;
+        bl.dstSubresource = bl.srcSubresource;
+        bl.dstOffsets[1].x = (int32_t)pw;
+        bl.dstOffsets[1].y = (int32_t)ph;
+        bl.dstOffsets[1].z = 1;
+        vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, img,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        garbage_add(s->image, s->view, s->mem);
+        s->image = img; s->view = view; s->mem = mem;
+        s->pw = pw; s->ph = ph;
+        s->gen++;                       /* cube maps built from it refill */
+    }
+    for (i = 0; i < VK_MAX_DEPTH; i++)
+        if (s_depth[i].image) {
+            garbage_add(s_depth[i].image, s_depth[i].view, s_depth[i].mem);
+            memset(&s_depth[i], 0, sizeof s_depth[i]);
+        }
+    if (copied)
+        barrier_all();
 }
 
 static VkDepthBuf *depth_get(uint32_t va, uint32_t pw, uint32_t ph)
@@ -1047,6 +1114,10 @@ static void rt_scale(uint32_t w, uint32_t h, uint32_t sw, uint32_t sh,
     if (h < lh) scale[1] *= (float)h / (float)lh;
 }
 
+/* Car reflections on/off at run time, for a game option (NFSU2: Options ->
+ * Video). Read on the executor thread at every cube stage bind. */
+volatile int nv2a_vk_cube_maps = 1;
+
 /* Stage i: its image view (a surface or a cached texture), sampler and
  * texcoord scale. Records uploads, so call it outside rendering or accept
  * that it ends the pass. */
@@ -1056,13 +1127,14 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
     /* Texture mode CUBE_MAP: the shader declares a samplerCube (gl_psh.c),
      * so the descriptor must be a cube view whatever is bound. */
     int cube = ((regs[0x1E70 / 4] >> (5 * i)) & 0x1F) == 3;
-    /* RECOMP_VK_CUBE=0: cube stages sample the black dummy (no car
-     * reflections, the old look). */
-    static int cube_on = -1;
-    if (cube_on < 0) {
+    /* RECOMP_VK_CUBE=0, or the title's option (nv2a_vk_cube_maps): cube
+     * stages sample the black dummy (no car reflections, the old look). */
+    static int cube_env = -1;
+    if (cube_env < 0) {
         const char *e = getenv("RECOMP_VK_CUBE");
-        cube_on = !(e && *e == '0');
+        cube_env = !(e && *e == '0');
     }
+    int cube_on = cube_env && nv2a_vk_cube_maps;
     uint32_t base = (0x1B00u + (uint32_t)i * 0x40u) / 4;
     uint32_t control0 = regs[base + 3];
     uint32_t format = regs[base + 1];
@@ -3243,6 +3315,12 @@ static void vk_flip(void)
     end_rendering();
     s_rt = NULL;
     s_rt_depth = NULL;
+    {
+        int pct = nv2a_vk_scale_pct;
+        double k = pct < 50 ? 0.0 : pct > 400 ? 4.0 : pct / 100.0;
+        if (k > 0.0 && k != s_scale)
+            rescale_surfaces(k);
+    }
     if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
                                           || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
         char path[320];

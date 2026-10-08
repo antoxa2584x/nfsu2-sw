@@ -246,6 +246,7 @@ void xbox_gil_enter(void);             /* kernel_bridge.c: the guest lock */
 void xbox_gil_leave(void);
 void xbox_gil_mark_main(void);
 void nfsu2_text_patch_init(void);    /* text_patch.c: Switch button names */
+void nfsu2_options_load(void);      /* recomp_manual.c: Options -> Video rows */
 
 #ifdef __SWITCH__
 #include <pthread.h>
@@ -420,6 +421,7 @@ static int game_main(void)
 
     xbox_kernel_init();
     nfsu2_text_patch_init();
+    nfsu2_options_load();
     xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
     xbox_kernel_bridge_init();
 

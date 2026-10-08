@@ -349,6 +349,33 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   vkCmdBlitImage when a face's `VkSurf.gen` changed (`cube_from_surfaces`).
   gl_psh.c emits samplerCube + texture(tN, vTN.xyz) only for VK; GL still
   black. Lavapipe menu/race frames show reflections, validation clean.
+- **Options -> Video -> Car Reflections On/Off, Resolution Scale (2026-10-08,
+  recomp_manual.c, `s_rows`):** the Xbox Video screen (sub_000CE8D0) only had the
+  Screen Size slider; rows are appended, built like the Gameplay
+  rows (0x54 bytes, sub_0012AF20, sub_0015B2E0) with a copy of the
+  Speedometer Units vtable (0x34EFD0) in xbox_ContiguousAlloc memory: its
+  handler/refresh (sub_000B5140/sub_000B51A0) are wrapped and act only for
+  that vtable. Label = PC's unused "Car Reflection Detail" (0x8FE9288E),
+  renamed "Car Reflections" by text_patch.c's s_always on every build
+  (Switch wording stays gated). Off = `nv2a_vk_cube_maps` 0 (cube stages
+  sample black) + no cube-face passes: the PC update-rate scheduler
+  sub_0009B720 rewrites the six EnvMap views' active bytes (+8, pointers
+  at 0x3F2AD0) every frame from a schedule at 0x39CE20, so the wrapper
+  clears them after it (clearing once at setup did nothing). Drag line on
+  lavapipe: 126 -> 0 cube-face draws, ~1240 -> ~1145 draw calls a frame.
+  Resolution Scale (Vulkan builds only): 1x/1.5x/2x/2.5x, default 1.5x,
+  `nv2a_vk_scale_pct`; at the next flip nv2a_vk.c `rescale_surfaces`
+  rebuilds every surface at the new stored size, blitting its pixels over
+  (kept render targets don't go black; `gen` bumped so cubes refill), and
+  drops the depth buffers. RECOMP_GL_SCALE only rules until the row is
+  changed (no `scale=` saved). Texts: PC-only strings renamed in every
+  language by text_patch.c s_always ("Car Geometry Detail" -> label,
+  "Road Reflection Detail"/"Motion Blur"/"Level Of Detail"/"Widescreen" ->
+  1x/1.5x/2x/2.5x; each hash only in the 28 string tables on disc, not in
+  code). Options load at boot (main.c `nfsu2_options_load`).
+  Stored in nfsu2x_options.txt (`reflections=0/1`, `scale=<percent>`,
+  sdmc:/switch/nfsu2x/ or the working directory), not the profile.
+  Validation clean toggling and over 12 rescales.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of

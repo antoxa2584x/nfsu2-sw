@@ -1646,6 +1646,292 @@ void sub_0033518D(void)
     esp += 4;
 }
 
+/* ── Options -> Video: Car Reflections, Resolution Scale ─────
+ *
+ * The Xbox Video screen (sub_000CE8D0, options category 1 at 0x406CC4)
+ * holds only the Screen Size slider. The port's own settings are appended
+ * as rows built like the Gameplay screen's (sub_000CEA00): 0x54 bytes,
+ * sub_0012AF20 constructor, added with sub_0015B2E0 -- the Player screen
+ * (sub_000CF960) mixes sliders and such rows too. Each row's class is a
+ * copy of the Speedometer Units row's vtable (0x34EFD0) in memory of our
+ * own, so the two methods that know the setting, the input handler (vt+4,
+ * sub_000B5140: left/right flips byte 0x406CDA) and the refresh (vt+0xC,
+ * sub_000B51A0: label + value text), can tell our rows by their vtable.
+ * Their texts are PC-only strings the Xbox never shows, renamed by
+ * text_patch.c (s_always); On/Off are Jump Camera's.
+ *
+ * Car Reflections Off does two things: the renderer's cube stages sample
+ * black (nv2a_vk_cube_maps, Vulkan only; GL never drew them), and the
+ * title stops rendering its dynamic cube map. Six "EnvMap %d" views, one
+ * per cube face (set up by sub_000A3BC0, pointers at 0x3F2AD0), are drawn
+ * by the race render loop in sub_000ADF60 only while their byte at +8 is
+ * set. The PC's update-rate scheduler, sub_0009B720 (thiscall on that
+ * table, every frame before the render), sets those bytes from a schedule
+ * (rows of six at 0x39CE20, row = frame % [0x39CE18]); after it, Off
+ * clears all six.
+ *
+ * Resolution Scale (Vulkan build only): 1x, 1.5x (default), 2x, 2.5x,
+ * handed to the renderer as nv2a_vk_scale_pct, applied at its next flip
+ * (nv2a_vk.c rescale_surfaces). Without a saved value RECOMP_GL_SCALE
+ * still decides, and the row shows the nearest step.
+ *
+ * Kept in nfsu2x_options.txt (sdmc:/switch/nfsu2x/ on the Switch, the
+ * working directory elsewhere), not in the game profile; loaded at boot
+ * (nfsu2_options_load, main.c). RECOMP_VK_CUBE=0 still forces the
+ * reflections off in the renderer. */
+#ifdef __SWITCH__
+#  define NFSU2_OPTIONS_FILE "sdmc:/switch/nfsu2x/nfsu2x_options.txt"
+#else
+#  define NFSU2_OPTIONS_FILE "nfsu2x_options.txt"
+#endif
+#define FE_PAD_LEFT     0x9120409Eu
+#define FE_PAD_RIGHT    0xB5971BF1u
+#define ROW_VTABLE      0x0034EFD0u     /* Speedometer Units */
+#define ROW_VTABLE_SIZE 0x48u
+#define ENVMAP_TABLE    0x003F2AD0u     /* six cube-face view pointers */
+
+#ifdef NFSU2_VULKAN
+extern volatile int nv2a_vk_cube_maps;
+extern volatile int nv2a_vk_scale_pct;
+#endif
+extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+extern void sub_000CE8D0_gen(void);
+extern void sub_000B5140_gen(void);
+extern void sub_000B51A0_gen(void);
+extern void sub_0009B720_gen(void);
+
+static const int s_scale_pct[] = { 100, 150, 200, 250 };
+
+static int s_refl = 1;                  /* 0 off, 1 on */
+static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
+static int s_scale_saved;               /* nfsu2x_options.txt had scale= */
+
+typedef struct {
+    uint32_t label;                     /* text hashes, see text_patch.c */
+    const uint32_t *texts;
+    int n;
+    int *value;
+    void (*changed)(void);
+    uint32_t vtable;                    /* guest copy of ROW_VTABLE */
+} OptRow;
+
+static void refl_changed(void)
+{
+#ifdef NFSU2_VULKAN
+    nv2a_vk_cube_maps = s_refl;
+#endif
+}
+
+#ifdef NFSU2_VULKAN
+static void scale_changed(void)
+{
+    nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
+    s_scale_saved = 1;
+}
+#endif
+
+static const uint32_t s_refl_texts[] = { 0x0000CCFAu, 0x0000063Cu };    /* Off, On */
+static const uint32_t s_scale_texts[] = {
+    0x2A2A4AB3u, 0x822E4E9Bu, 0xB55E7665u, 0xD3588630u,                 /* 1x .. 2.5x */
+};
+static OptRow s_rows[] = {
+    { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0 },        /* Car Reflections */
+#ifdef NFSU2_VULKAN
+    { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0 }, /* Resolution Scale */
+#endif
+};
+#define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
+
+void nfsu2_options_load(void)
+{
+    char line[128];
+    FILE *f = fopen(NFSU2_OPTIONS_FILE, "r");
+    int i;
+
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            if (!strncmp(line, "reflections=", 12))
+                s_refl = line[12] != '0';
+            else if (!strncmp(line, "scale=", 6)) {
+                int pct = atoi(line + 6);
+                for (i = 0; i < 4; i++)
+                    if (s_scale_pct[i] == pct) {
+                        s_scale_idx = i;
+                        s_scale_saved = 1;
+                    }
+            }
+        }
+        fclose(f);
+    }
+    refl_changed();
+#ifdef NFSU2_VULKAN
+    {
+        const char *e = getenv("RECOMP_GL_SCALE");
+        if (!s_scale_saved && e && *e) {
+            /* RECOMP_GL_SCALE stays in charge until the option is changed;
+             * the row shows the nearest step. */
+            double k = strtod(e, NULL), best = 1e9;
+            for (i = 0; i < 4; i++) {
+                double d = fabs(k * 100.0 - s_scale_pct[i]);
+                if (d < best) { best = d; s_scale_idx = i; }
+            }
+        } else {
+            nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
+        }
+    }
+    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s\n",
+            s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
+            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)");
+#else
+    fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
+#endif
+}
+
+static void options_save(void)
+{
+    FILE *f = fopen(NFSU2_OPTIONS_FILE, "w");
+    if (!f) {
+        fprintf(stderr, "[options] cannot write " NFSU2_OPTIONS_FILE "\n");
+        return;
+    }
+    fprintf(f, "reflections=%d\n", s_refl);
+    if (s_scale_saved)
+        fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
+    fclose(f);
+}
+
+static OptRow *opt_row(uint32_t obj)
+{
+    int i;
+    uint32_t vt;
+
+    if (!obj || !(vt = MEM32(obj)))
+        return NULL;
+    for (i = 0; i < N_ROWS; i++)
+        if (s_rows[i].vtable == vt)
+            return &s_rows[i];
+    return NULL;
+}
+
+/* Face views off for this frame (on: the scheduler's choice stands). */
+static void refl_views(void)
+{
+    uint32_t n, v;
+
+    if (s_refl)
+        return;
+    for (n = 0; n < 6; n++)
+        if ((v = MEM32(ENVMAP_TABLE + n * 4)) != 0)
+            MEM8(v + 8) = 0;
+}
+
+/* Video screen (thiscall, ecx = options screen): the original rows, then
+ * ours. */
+void sub_000CE8D0(void)
+{
+    uint32_t screen = ecx, row;
+    int i;
+
+    sub_000CE8D0_gen();
+    for (i = 0; i < N_ROWS; i++) {
+        OptRow *o = &s_rows[i];
+        if (!o->vtable) {
+            o->vtable = xbox_ContiguousAlloc(ROW_VTABLE_SIZE, 16);
+            if (!o->vtable)
+                return;
+            memcpy((void *)XBOX_PTR(o->vtable), (const void *)XBOX_PTR(ROW_VTABLE),
+                   ROW_VTABLE_SIZE);
+        }
+        PUSH32(esp, 0x54u);                 /* operator new(0x54), cdecl */
+        PUSH32(esp, 0x000CEAD4u);
+        sub_0003ED50();
+        esp += 4;
+        row = eax;
+        if (!row)
+            return;
+        PUSH32(esp, 1);                     /* row(&screen[0x100..0x120], 1) */
+        PUSH32(esp, screen + 0x120u);
+        PUSH32(esp, screen + 0x118u);
+        PUSH32(esp, screen + 0x110u);
+        PUSH32(esp, screen + 0x100u);
+        ecx = row;
+        PUSH32(esp, 0x000CEB0Cu);
+        sub_0012AF20();                     /* thiscall, pops its 5 */
+        MEM32(row) = o->vtable;
+        PUSH32(esp, 1);                     /* screen->AddOption(row, 1) */
+        PUSH32(esp, row);
+        ecx = screen;
+        PUSH32(esp, 0x000CEB23u);
+        sub_0015B2E0();                     /* thiscall, pops its 2 */
+    }
+}
+
+/* Row refresh (thiscall): label and value text. */
+static void opt_row_text(uint32_t row, const OptRow *o)
+{
+    PUSH32(esp, o->label);
+    PUSH32(esp, MEM32(row + 0x2Cu));
+    PUSH32(esp, 0x000B51B1u);
+    sub_00118BF0();
+    esp += 8;
+    PUSH32(esp, o->texts[*o->value]);
+    PUSH32(esp, MEM32(row + 0x30u));
+    PUSH32(esp, 0x000B51CEu);
+    sub_00118BF0();
+    esp += 8;
+}
+
+void sub_000B51A0(void)
+{
+    OptRow *o = opt_row(ecx);
+
+    if (!o) {
+        sub_000B51A0_gen();
+        return;
+    }
+    opt_row_text(ecx, o);
+    esp += 4;
+}
+
+/* Row input (thiscall, (?, message), ret 8): left/right step the value
+ * (wrapping, like the game's two-value rows), then the arrow flash
+ * (vt+0x40) and the refresh, as the original. */
+void sub_000B5140(void)
+{
+    uint32_t row = ecx, msg = MEM32(esp + 8);
+    OptRow *o = opt_row(row);
+
+    if (!o) {
+        sub_000B5140_gen();
+        return;
+    }
+    if (msg == FE_PAD_LEFT || msg == FE_PAD_RIGHT) {
+        *o->value = (*o->value + (msg == FE_PAD_RIGHT ? 1 : o->n - 1)) % o->n;
+        o->changed();
+        refl_views();
+        options_save();
+#ifdef NFSU2_VULKAN
+        fprintf(stderr, "[options] car reflections %s, resolution scale %d%%\n",
+                s_refl ? "on" : "off", s_scale_pct[s_scale_idx]);
+#else
+        fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
+#endif
+    }
+    PUSH32(esp, msg);
+    ecx = row;
+    PUSH32(esp, 0x000B5171u);
+    sub_0012B3B0();                         /* thiscall, pops its 1 */
+    opt_row_text(row, o);
+    esp += 4 + 8;
+}
+
+/* Env-map update scheduler (thiscall, 2 args, ret 8). */
+void sub_0009B720(void)
+{
+    sub_0009B720_gen();
+    refl_views();
+}
+
 /* ── Manual function overrides ─────────────────────────────── */
 
 /*

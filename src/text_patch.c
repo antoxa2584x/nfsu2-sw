@@ -11,9 +11,11 @@
  *
  * The chunk is patched as NtReadFile delivers it (xbox_file_read_hook):
  * every string is rewritten into a new pool, which must not grow, and the
- * table offsets follow. Only the English table is touched (recognised by
- * one known string). NFSU2_SWITCH_TEXT=0 turns it off, =1 turns it on
- * outside the Switch build.
+ * table offsets follow. The Switch wording goes into the English table
+ * only (recognised by one known string); NFSU2_SWITCH_TEXT=0 turns it off,
+ * =1 turns it on outside the Switch build. s_always goes into every
+ * language, on every build: the texts of the port's own options
+ * (recomp_manual.c), which take over PC-only strings the Xbox never shows.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -27,6 +29,20 @@ extern void (*xbox_file_read_hook)(void *buf, size_t len, int64_t offset);
 #define LANG_ALIGN      0x800u      /* chunks start on pack sectors */
 #define HASH_ENGLISH    0x45A6A9CEu /* TITLE_SCREEN_START_PROMPT_XBOX */
 #define TEXT_ENGLISH    "Please press START to begin"
+
+/* Whole strings, by label hash, on every build. The pool must not grow,
+ * so these are no longer than what they replace. */
+static const struct { uint32_t hash; const char *text; } s_always[] = {
+    /* Options -> Video rows */
+    { 0x8FE9288Eu, "Car Reflections" },          /* "Car Reflection Detail" */
+    { 0x4AC50BCFu, "Resolution Scale" },         /* "Car Geometry Detail" */
+    { 0x2A2A4AB3u, "1x" },                       /* "Road Reflection Detail" */
+    { 0x822E4E9Bu, "1.5x" },                     /* "Motion Blur" */
+    { 0xB55E7665u, "2x" },                       /* "Level Of Detail" */
+    { 0xD3588630u, "2.5x" },                     /* "Widescreen" */
+};
+
+static int s_switch_words;
 
 /* Whole strings, by label hash. */
 static const struct { uint32_t hash; const char *text; } s_by_hash[] = {
@@ -71,9 +87,13 @@ static const struct { const char *from, *to; } s_rules[] = {
 };
 
 /* src -> dst (cap bytes), NUL-terminated; returns the length or -1. */
-static int rewrite(uint32_t hash, const char *src, char *dst, size_t cap)
+static int rewrite(uint32_t hash, const char *src, char *dst, size_t cap, int english)
 {
     size_t n = 0, i;
+    for (i = 0; i < sizeof s_always / sizeof s_always[0]; i++)
+        if (s_always[i].hash == hash) { src = s_always[i].text; goto copy; }
+    if (!s_switch_words || !english)
+        goto copy;
     for (i = 0; i < sizeof s_by_hash / sizeof s_by_hash[0]; i++)
         if (s_by_hash[i].hash == hash) { src = s_by_hash[i].text; goto copy; }
     while (*src) {
@@ -121,15 +141,14 @@ static void patch_chunk(uint8_t *c, size_t avail)
     char *p = (char *)base + pool;
     size_t plen = size - pool;
     uint32_t k;
+    int english = 0;
 
-    /* English? */
     for (k = 0; k < count; k++)
-        if (rd32(t + 8 * k) == HASH_ENGLISH) break;
-    if (k == count) return;
-    {
-        uint32_t o = rd32(t + 8 * k + 4);
-        if (o >= plen || strncmp(p + o, TEXT_ENGLISH, plen - o) != 0) return;
-    }
+        if (rd32(t + 8 * k) == HASH_ENGLISH) {
+            uint32_t o = rd32(t + 8 * k + 4);
+            english = o < plen && strncmp(p + o, TEXT_ENGLISH, plen - o) == 0;
+            break;
+        }
 
     char *out = malloc(plen);
     uint32_t *noff = malloc(count * sizeof *noff);
@@ -139,7 +158,7 @@ static void patch_chunk(uint8_t *c, size_t avail)
     for (k = 0; k < count; k++) {
         uint32_t o = rd32(t + 8 * k + 4);
         if (o >= plen || !memchr(p + o, 0, plen - o)) goto fail;
-        int n = rewrite(rd32(t + 8 * k), p + o, out + used, plen - used);
+        int n = rewrite(rd32(t + 8 * k), p + o, out + used, plen - used, english);
         if (n < 0) goto fail;
         if (strcmp(out + used, p + o) != 0) changed++;
         noff[k] = (uint32_t)used;
@@ -149,7 +168,8 @@ static void patch_chunk(uint8_t *c, size_t avail)
     memset(p + used, 0, plen - used);
     for (k = 0; k < count; k++)
         wr32(t + 8 * k + 4, noff[k]);
-    printf("[TEXT] Switch wording: %d of %u strings changed\n", changed, count);
+    printf("[TEXT] %s: %d of %u strings changed\n",
+           english && s_switch_words ? "Switch wording" : "option labels", changed, count);
     free(out); free(noff);
     return;
 fail:
@@ -177,6 +197,6 @@ void nfsu2_text_patch_init(void)
 #else
     int on = e && e[0] == '1';
 #endif
-    if (on)
-        xbox_file_read_hook = on_read;
+    s_switch_words = on;
+    xbox_file_read_hook = on_read;
 }

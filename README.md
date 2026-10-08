@@ -30,6 +30,11 @@ instruction by instruction to C and running natively, with no emulator.
 - 🎮 **Two renderers**: Vulkan (NVK on Switch) and OpenGL, with render scaling
   up to 4x
 - 📺 **Widescreen 16:9** by default, using the game's own wide mode
+- 🪞 **Car reflections** (Vulkan), switchable in the game's
+  **Options → Video → Car Reflections**; Off also skips the six reflection
+  passes the game draws every race frame
+- 🔍 **Resolution Scale** in **Options → Video** (Vulkan): 1x, 1.5x
+  (default), 2x, 2.5x, applied at once
 - 🎬 **Full-screen movies** decoded with FFmpeg (VP6)
 - 🔊 **Audio** through an emulated Xbox APU, with 5.1 downmixed to stereo
 - 👥 **Two-player split screen**, with Joy-Con pairs or one sideways Joy-Con
@@ -51,6 +56,7 @@ instruction by instruction to C and running natively, with no emulator.
 sdmc:/switch/nfsu2x/
 ├── nfsu2x-vulkan.nro
 ├── nfsu2x_env.txt      optional settings, KEY=VALUE per line
+├── nfsu2x_options.txt  written by the in-game options the port adds
 └── game/
     ├── default.xbe
     └── ...
@@ -206,7 +212,7 @@ RECOMP_WIDESCREEN=0
 | Variable | Meaning |
 |---|---|
 | `RECOMP_PB_EXEC` | Execute the NV2A pushbuffer (default 1; the title draws through it). |
-| `RECOMP_GL_SCALE` | Render resolution multiple, 0.5..4 (fractions allowed). |
+| `RECOMP_GL_SCALE` | Render resolution multiple, 0.5..4 (fractions allowed). Vulkan: only until Options → Video → Resolution Scale is changed (default there 1.5x). |
 | `RECOMP_GL_THREAD=1` | GL renderer: GL calls on their own thread. |
 | `RECOMP_GL_DIRECT=0` | Convert every vertex to float4 instead of uploading it as stored. |
 | `RECOMP_GL_DXT=0` | Decode DXT textures on the CPU instead of uploading them compressed. |
@@ -219,7 +225,7 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_GL_TRACE=1` | Shader sources and compile/link errors. |
 | `RECOMP_GL_FINISH=1` | Wait for the GPU after every operation (finds the call that hangs it). |
 | `RECOMP_FPS_LOG=1` | Presented frames per 10 s. |
-| `RECOMP_VK_CUBE=0` | Vulkan: no cube maps (car reflections off). |
+| `RECOMP_VK_CUBE=0` | Vulkan: no cube maps (car reflections off), whatever Options → Video says. |
 | `RECOMP_VK_HEADLESS=1` | Vulkan on Linux: no window (also implied by `SDL_VIDEODRIVER=offscreen`). |
 | `RECOMP_VK_VALIDATION=1` | Vulkan on Linux: Khronos validation layer. |
 | `RECOMP_VK_TRACE=<n>` | Vulkan: name every step of the first n draws/clears/flips. |
