@@ -924,8 +924,12 @@ static void prof_start(void)
  * The CPU is what limits this port: the game thread, the pushbuffer
  * executor and the GL/Vulkan thread are all CPU-bound. Through clkrst
  * (8.0.0+) or pcv, as sys-clk does; the old rates come back on exit. The
- * system resets clocks on dock/undock and after sleep, so a thread applies
- * them again every second while the game has focus. More heat and battery:
+ * system resets clocks on dock/undock, after sleep and when the game comes
+ * back from the HOME menu, so a thread applies them again every second
+ * while the game has focus, and every 250 ms for 5 s after any focus,
+ * dock or performance-mode change (applet hook). It runs at a high priority:
+ * at the lowest (0x3F) the busy guest threads (0x3B) on its core starved it
+ * and the clocks stayed at the system's after HOME. More heat and battery:
  * opt-in. sys-clk, when installed, may override them with its own profile. */
 static struct {
     const char *env, *name;
@@ -943,6 +947,8 @@ static int s_clk_rst = -1;                 /* 1 clkrst, 0 pcv, -1 not up */
 static volatile int s_clk_stop;
 static Thread s_clk_thread;
 static int s_clk_thread_up;
+static UEvent s_clk_wake;
+static AppletHookCookie s_clk_hook;
 
 static Result clk_get(int i, u32 *hz)
 {
@@ -977,6 +983,8 @@ static void clk_restore(void)
     if (s_clk_rst < 0)
         return;
     s_clk_stop = 1;
+    appletUnhook(&s_clk_hook);
+    ueventSignal(&s_clk_wake);
     if (s_clk_thread_up) {
         threadWaitForExit(&s_clk_thread);
         threadClose(&s_clk_thread);
@@ -995,12 +1003,25 @@ static void clk_restore(void)
     s_clk_rst = -1;
 }
 
+/* Runs on the thread that pumps applet messages (SDL's event loop). */
+static void clk_hook(AppletHookType hook, void *param)
+{
+    (void)param;
+    if (hook == AppletHookType_OnFocusState || hook == AppletHookType_OnOperationMode
+        || hook == AppletHookType_OnPerformanceMode || hook == AppletHookType_OnResume)
+        ueventSignal(&s_clk_wake);
+}
+
 static void clk_keeper(void *arg)
 {
-    unsigned logged = 0;
+    unsigned logged = 0, fast = 0;
     (void)arg;
     while (!s_clk_stop) {
-        svcSleepThread(1000000000ull);
+        if (R_SUCCEEDED(waitSingle(waiterForUEvent(&s_clk_wake),
+                                   fast ? 250000000ull : 1000000000ull)))
+            fast = 20;
+        else if (fast)
+            fast--;
         if (s_clk_stop || appletGetFocusState() != AppletFocusState_InFocus)
             continue;
         for (int i = 0; i < 3; i++) {
@@ -1059,7 +1080,9 @@ static void clk_apply(void)
                R_FAILED(rc) ? " -- refused" : "");
     }
     atexit(clk_restore);
-    if (R_SUCCEEDED(threadCreate(&s_clk_thread, clk_keeper, NULL, NULL, 0x4000, 0x3F, -2))
+    ueventCreate(&s_clk_wake, true);
+    appletHook(&s_clk_hook, clk_hook, NULL);
+    if (R_SUCCEEDED(threadCreate(&s_clk_thread, clk_keeper, NULL, NULL, 0x4000, 0x2C, -2))
         && R_SUCCEEDED(threadStart(&s_clk_thread)))
         s_clk_thread_up = 1;
 }

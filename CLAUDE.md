@@ -734,7 +734,10 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   NFSU2_MEM_MHZ via clkrst (8.0+) or pcv: highest listed rate <= the
   request, caps 1785 / 921.6 / 1600, old rates restored on exit (atexit +
   switch_shutdown), re-applied every second while focused (dock/sleep
-  reset them). Log `[clock] CPU 1020 -> 1785 MHz`. Not hardware-tested.
+  reset them). Log `[clock] CPU 1020 -> 1785 MHz`. HOME and back left the
+  system's clocks (2026-10-08, NFSU2 + Carbon): the keeper thread ran at
+  0x3F and busy guest threads (0x3B) starved it; now 0x2C, plus an applet
+  hook (focus/dock/perf mode/resume) that re-checks every 250 ms for 5 s.
 - **Draw merging is not possible as is:** RECOMP_MERGE_STATS (removed
   again) over a race: 0% of draws have state identical to the previous
   one; ~45% differ only in vertex-program constants (per-object matrices),
