@@ -43,7 +43,10 @@ static uint32_t s_tot_words, s_tot_unknown, s_tot_jumps, s_tot_segments;
  * the executor writes to guest memory. */
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
 extern void nv2a_pb_exec_report(void);
+extern uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
+                                 const uint32_t *p, uint32_t count);
 static int s_exec_enabled = -1;
+static int s_survey;                  /* RECOMP_PB_SCAN: count every method */
 
 /* Slot + 1 of each (subchannel, method) in s_seen. note() runs for every
  * pushbuffer word, so a linear search here was the executor's largest cost
@@ -231,9 +234,11 @@ void nv2a_pb_scan(uint32_t put_phys)
     uint32_t put = put_phys & PB_PHYS_MASK;
     uint32_t words = 0, jumps = 0, unknown = 0;
 
-    if (s_exec_enabled < 0)
+    if (s_exec_enabled < 0) {
         s_exec_enabled = getenv("RECOMP_PB_EXEC") != NULL;
-    if (!(s_exec_enabled || getenv("RECOMP_PB_SCAN")))
+        s_survey = getenv("RECOMP_PB_SCAN") != NULL;
+    }
+    if (!(s_exec_enabled || s_survey))
         return;
     if (s_get == 0xFFFFFFFFu) {               /* never resynced: start at PUT */
         s_get = put;
@@ -309,10 +314,20 @@ void nv2a_pb_scan(uint32_t put_phys)
             uint32_t method =  w & 0x1FFCu;
             int noninc = (w & 0xE0000000u) == 0x40000000u;
 
+            if (s_exec_enabled && !s_survey && count > 1
+                && s_get + count * 4 <= PB_RAM_BYTES
+                && nv2a_pb_exec_run(subch, method, noninc,
+                                    (const uint32_t *)(mem + (0x80000000u | s_get)), count)) {
+                s_get = (s_get + count * 4) & PB_PHYS_MASK;
+                words += count;
+                unknown = 0;
+                continue;
+            }
             for (uint32_t i = 0; i < count && s_get < PB_RAM_BYTES; i++) {
                 uint32_t m = noninc ? method : method + i * 4;
                 uint32_t param = *(const uint32_t *)(mem + (0x80000000u | s_get));
-                note(subch, m);
+                if (s_survey)
+                    note(subch, m);
                 /* Same walk, two consumers: the survey counts, the executor
                  * acts. Keeping them on one decode means they can never
                  * disagree about what the stream said. */

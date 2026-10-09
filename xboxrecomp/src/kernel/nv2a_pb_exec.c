@@ -4208,6 +4208,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     }
 
     if (subch != 0) {                      /* 3D class lives on subchannel 0 */
+        static int trace2d = -1, shown2d;
+        if (trace2d < 0) {
+            const char *e = getenv("RECOMP_PB_2D");
+            trace2d = e && *e && *e != '0';
+        }
+        if (trace2d && shown2d++ < 4000)
+            fprintf(stderr, "  [2D] subch %u method 0x%04X param 0x%08X\n",
+                    subch, method, param);
         note_unhandled(method, param);
         return;
     }
@@ -4491,6 +4499,53 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         }
         break;
     }
+}
+
+/* A whole method run from one pushbuffer header (count words at p). The two
+ * bulk runs of a race -- vertex-program constants (0x0B80..0x0BFC, ~55% of
+ * the words in NFSU1) and ARRAY_ELEMENT16 indices (~28%) -- are taken here
+ * in one loop, with exactly the effects nv2a_pb_exec_method has word by
+ * word; anything else returns 0 and goes through it. A call per word
+ * through the method dispatch was a third of the executor on the console. */
+uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
+                          const uint32_t *p, uint32_t count)
+{
+    uint32_t i;
+
+    if (subch != 0 || !count || pb_verbose())
+        return 0;
+    if (method == NV097_ARRAY_ELEMENT16 && (noninc || count == 1)) {
+        uint32_t w = NV097_ARRAY_ELEMENT16 / 4;
+        if (s_reg[w] != p[count - 1]) {      /* only the last value is seen */
+            s_reg[w] = p[count - 1];
+            s_reg_dirty[w >> 4] = 1;
+        }
+        if (s_gpu.prim)
+            for (i = 0; i < count && s_gpu.idx_count + 2 <= NV_MAX_INDICES; i++) {
+                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] & 0xFFFF);
+                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] >> 16);
+            }
+        return count;
+    }
+    if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT
+        && method + count * 4 <= NV097_SET_TRANSFORM_CONSTANT + 0x80) {
+        uint32_t slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
+        for (i = 0; i < count; i++, slot++) {
+            uint32_t w = (method / 4) + i;
+            if (s_reg[w] != p[i]) {
+                s_reg[w] = p[i];
+                s_reg_dirty[w >> 4] = 1;
+            }
+            if (s_vp.const_load < VP_CONSTS)
+                memcpy(&s_vp.c[s_vp.const_load][slot % 4], &p[i], 4);
+            if (slot % 4 == 3)
+                s_vp.const_load++;
+        }
+        s_vp.gen++;
+        s_vp.const_gen++;
+        return count;
+    }
+    return 0;
 }
 
 /* Find where the title actually wrote its quad.

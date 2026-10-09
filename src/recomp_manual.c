@@ -1646,7 +1646,7 @@ void sub_0033518D(void)
     esp += 4;
 }
 
-/* ── Options -> Video: Car Reflections, Resolution Scale ─────
+/* ── Options -> Video: Car Reflections, Resolution Scale, picture ─
  *
  * The Xbox Video screen (sub_000CE8D0, options category 1 at 0x406CC4)
  * holds only the Screen Size slider. The port's own settings are appended
@@ -1675,8 +1675,16 @@ void sub_0033518D(void)
  * (nv2a_vk.c rescale_surfaces). Without a saved value RECOMP_GL_SCALE
  * still decides, and the row shows the nearest step.
  *
+ * Picture rows (Vulkan build only; renderer: nv2a_vk.c): Anti-Aliasing =
+ * FXAA in the present pass (nv2a_vk_fxaa); Anisotropic = Off/2x/4x/8x/16x
+ * on the title's mipmapped textures (nv2a_vk_aniso); Square Pixels = in
+ * 16:9, 4/3 more columns on surfaces without horizontal AA (races 1280x720
+ * at 1.5x instead of 960x720; nv2a_vk_square, applied at the next flip).
+ * The renderer's env switches still force each one off.
+ *
  * Kept in nfsu2x_options.txt (sdmc:/switch/nfsu2x/ on the Switch, the
- * working directory elsewhere), not in the game profile; loaded at boot
+ * working directory elsewhere; reflections=, scale=, fxaa=, aniso=,
+ * square=), not in the game profile; loaded at boot
  * (nfsu2_options_load, main.c). RECOMP_VK_CUBE=0 still forces the
  * reflections off in the renderer. */
 #ifdef __SWITCH__
@@ -1693,6 +1701,9 @@ void sub_0033518D(void)
 #ifdef NFSU2_VULKAN
 extern volatile int nv2a_vk_cube_maps;
 extern volatile int nv2a_vk_scale_pct;
+extern volatile int nv2a_vk_fxaa;
+extern volatile int nv2a_vk_aniso;
+extern volatile int nv2a_vk_square;
 #endif
 extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
 extern void sub_000CE8D0_gen(void);
@@ -1701,10 +1712,14 @@ extern void sub_000B51A0_gen(void);
 extern void sub_0009B720_gen(void);
 
 static const int s_scale_pct[] = { 100, 150, 200, 250 };
+static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
 
 static int s_refl = 1;                  /* 0 off, 1 on */
 static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
 static int s_scale_saved;               /* nfsu2x_options.txt had scale= */
+static int s_fxaa = 1;                  /* 0 off, 1 on */
+static int s_aniso_idx = 4;             /* into s_aniso_lvl: 16x */
+static int s_square = 1;                /* 0 off, 1 on */
 
 typedef struct {
     uint32_t label;                     /* text hashes, see text_patch.c */
@@ -1728,19 +1743,45 @@ static void scale_changed(void)
     nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
     s_scale_saved = 1;
 }
+
+static void picture_changed(void)
+{
+    nv2a_vk_fxaa = s_fxaa;
+    nv2a_vk_aniso = s_aniso_lvl[s_aniso_idx];
+    nv2a_vk_square = s_square;
+}
 #endif
 
 static const uint32_t s_refl_texts[] = { 0x0000CCFAu, 0x0000063Cu };    /* Off, On */
 static const uint32_t s_scale_texts[] = {
     0x2A2A4AB3u, 0x822E4E9Bu, 0xB55E7665u, 0xD3588630u,                 /* 1x .. 2.5x */
 };
+static const uint32_t s_aniso_texts[] = {
+    0x0000CCFAu, 0xB55E7665u, 0xA7A683ACu, 0x6F2C7417u, 0x62925361u,    /* Off, 2x .. 16x */
+};
 static OptRow s_rows[] = {
     { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0 },        /* Car Reflections */
 #ifdef NFSU2_VULKAN
     { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0 }, /* Resolution Scale */
+    { 0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0 },     /* Anti-Aliasing */
+    { 0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0 }, /* Anisotropic */
+    { 0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0 },   /* Square Pixels */
 #endif
 };
 #define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
+
+static void options_log(void)
+{
+#ifdef NFSU2_VULKAN
+    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s, anti-aliasing %s,"
+            " anisotropic %dx, square pixels %s\n",
+            s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
+            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)", s_fxaa ? "on" : "off",
+            s_aniso_lvl[s_aniso_idx], s_square ? "on" : "off");
+#else
+    fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
+#endif
+}
 
 void nfsu2_options_load(void)
 {
@@ -1752,6 +1793,16 @@ void nfsu2_options_load(void)
         while (fgets(line, sizeof line, f)) {
             if (!strncmp(line, "reflections=", 12))
                 s_refl = line[12] != '0';
+            else if (!strncmp(line, "fxaa=", 5))
+                s_fxaa = line[5] != '0';
+            else if (!strncmp(line, "square=", 7))
+                s_square = line[7] != '0';
+            else if (!strncmp(line, "aniso=", 6)) {
+                int a = atoi(line + 6);
+                for (i = 0; i < 5; i++)
+                    if (s_aniso_lvl[i] == a)
+                        s_aniso_idx = i;
+            }
             else if (!strncmp(line, "scale=", 6)) {
                 int pct = atoi(line + 6);
                 for (i = 0; i < 4; i++)
@@ -1779,12 +1830,9 @@ void nfsu2_options_load(void)
             nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
         }
     }
-    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s\n",
-            s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
-            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)");
-#else
-    fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
+    picture_changed();
 #endif
+    options_log();
 }
 
 static void options_save(void)
@@ -1797,6 +1845,9 @@ static void options_save(void)
     fprintf(f, "reflections=%d\n", s_refl);
     if (s_scale_saved)
         fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
+#ifdef NFSU2_VULKAN
+    fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
+#endif
     fclose(f);
 }
 
@@ -1826,13 +1877,34 @@ static void refl_views(void)
 }
 
 /* Video screen (thiscall, ecx = options screen): the original rows, then
- * ours. */
+ * ours. The screen shows a colour-calibration panel in the lower half --
+ * FE objects ColorCal_Logo, ColorCal_Blurb ("lower the brightness of your
+ * television") and Colour_Calibration_Backing (names at 0x34F424/0x34F414/
+ * 0x34F3F8) -- over list rows 5 and up, where our rows land; they are
+ * hidden again, as the screen itself hides objects (sub_00118CE0). */
+static const uint32_t s_colorcal_names[] = { 0x0034F424u, 0x0034F414u, 0x0034F3F8u };
+
 void sub_000CE8D0(void)
 {
     uint32_t screen = ecx, row;
     int i;
 
     sub_000CE8D0_gen();
+    for (i = 0; i < 3; i++) {
+        PUSH32(esp, s_colorcal_names[i]);   /* name hash, cdecl */
+        PUSH32(esp, 0x000CE9A5u);
+        sub_001160C0();
+        esp += 4;
+        PUSH32(esp, eax);                   /* FE object by hash, cdecl */
+        PUSH32(esp, MEM32(screen + 4u));
+        PUSH32(esp, 0x000CE9ACu);
+        sub_00144310();
+        esp += 8;
+        PUSH32(esp, eax);                   /* hide it, cdecl */
+        PUSH32(esp, 0x000CE918u);
+        sub_00118CE0();
+        esp += 4;
+    }
     for (i = 0; i < N_ROWS; i++) {
         OptRow *o = &s_rows[i];
         if (!o->vtable) {
@@ -1910,12 +1982,7 @@ void sub_000B5140(void)
         o->changed();
         refl_views();
         options_save();
-#ifdef NFSU2_VULKAN
-        fprintf(stderr, "[options] car reflections %s, resolution scale %d%%\n",
-                s_refl ? "on" : "off", s_scale_pct[s_scale_idx]);
-#else
-        fprintf(stderr, "[options] car reflections %s\n", s_refl ? "on" : "off");
-#endif
+        options_log();
     }
     PUSH32(esp, msg);
     ecx = row;

@@ -376,6 +376,35 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   Stored in nfsu2x_options.txt (`reflections=0/1`, `scale=<percent>`,
   sdmc:/switch/nfsu2x/ or the working directory), not the profile.
   Validation clean toggling and over 12 rescales.
+- **Picture quality from NFSU1 0.2.5 (2026-10-09, nv2a_vk.c, Vulkan only):**
+  textures had one level (maxLod 0): the guest's level count (format
+  [19:16]) is honoured, DXT uploads the title's levels, decoded formats get
+  GPU blits (gen_mips); MIN 3..6 samplers are trilinear + anisotropic
+  (16x, LOD bias -0.25); dynamic reflection cubes mipmapped; present is
+  one FXAA 3.11 draw. RECOMP_VK_MIPS / _ANISO / _LOD_BIAS / _FXAA.
+  Square pixels (per-axis scale, u_snap_y in gl_vsh.c's VK block): in
+  widescreen, surfaces with aa_sx 1 get 4/3 the columns (race back buffer
+  640x480 at 1.5x -> 1280x720 instead of 960x720); the front end's
+  1280x480 (aa 2x1) is left alone. RECOMP_VK_SQUARE=0 off,
+  RECOMP_GL_SCALE_X sets the horizontal scale outright. Also from
+  NFSU1: nv2a_pb_exec_run (constant/ARRAY_ELEMENT16 runs in one loop, the
+  survey only under RECOMP_PB_SCAN), swizzle tables, textures decoded
+  straight into the ring, vertex input re-sent only on change. Merged by
+  taking NFSU1's nv2a_vk.c and re-adding NFSU2's stored_size/
+  rescale_surfaces/nv2a_vk_scale_pct and nv2a_vk_cube_maps.
+  Options -> Video rows (recomp_manual.c s_rows, Vulkan build only):
+  Anti-Aliasing Off/On (nv2a_vk_fxaa), Anisotropic Off/2x/4x/8x/16x
+  (nv2a_vk_aniso; level in sampler key bits 20..24), Square Pixels Off/On
+  (nv2a_vk_square, applied at the next flip by rescale_surfaces); saved as
+  fxaa=/aniso=/square= in nfsu2x_options.txt; env switches still force
+  each off. Labels from PC-only strings (text_patch.c s_always): "Full
+  Screen Anti-Aliasing", "Horizon Fog", "Depth Of Field" -> labels, "Car
+  Shadow"/"Light Trails"/"Light Glow" -> 4x/8x/16x (each hash only in the
+  28 string tables, 0 refs in the XBE). The Video screen's colour-
+  calibration panel (FE objects ColorCal_Logo/ColorCal_Blurb/
+  Colour_Calibration_Backing) covered list rows 5+: hidden after the
+  screen is built (sub_00118CE0). Menu path on Linux: Main Menu -> right
+  until Options (last, no wrap) -> a -> right (Video) -> a.
 - **Off-screen batches skipped in the executor** (2026-10-05, nv2a_pb_exec.c,
   `RECOMP_CULL=0` off, `RECOMP_CULL_CHECK=1` verifies each rejection with
   the CPU interpreter, `RECOMP_CULL_TRACE=1` per program): the box of

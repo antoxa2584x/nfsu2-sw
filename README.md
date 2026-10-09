@@ -11,7 +11,7 @@ instruction by instruction to C and running natively, with no emulator.
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.5-blue)
+![Version](https://img.shields.io/badge/version-0.5.5-blue)
 
 [Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
 
@@ -35,6 +35,10 @@ instruction by instruction to C and running natively, with no emulator.
   passes the game draws every race frame
 - 🔍 **Resolution Scale** in **Options → Video** (Vulkan): 1x, 1.5x
   (default), 2x, 2.5x, applied at once
+- 🖼️ **Cleaner picture** (Vulkan): mipmaps with trilinear and anisotropic
+  filtering, mipmapped car reflections, FXAA, square pixels in 16:9 races
+  (1280x720 at 1.5x); **Anti-Aliasing**, **Anisotropic** (Off-16x) and
+  **Square Pixels** in **Options → Video**
 - 🎬 **Full-screen movies** decoded with FFmpeg (VP6)
 - 🔊 **Audio** through an emulated Xbox APU, with 5.1 downmixed to stereo
 - 👥 **Two-player split screen**, with Joy-Con pairs or one sideways Joy-Con
@@ -225,6 +229,12 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_GL_TRACE=1` | Shader sources and compile/link errors. |
 | `RECOMP_GL_FINISH=1` | Wait for the GPU after every operation (finds the call that hangs it). |
 | `RECOMP_FPS_LOG=1` | Presented frames per 10 s. |
+| `RECOMP_VK_MIPS=0` | Vulkan: no mipmaps (distant textures shimmer, the old look). |
+| `RECOMP_VK_ANISO` | Vulkan: anisotropic filtering, 1..16 (default 16; 1 = off). |
+| `RECOMP_VK_LOD_BIAS` | Vulkan: mip bias, negative = sharper (default -0.25). |
+| `RECOMP_VK_FXAA=0` | Vulkan: no FXAA (plain scaled blit to the screen). |
+| `RECOMP_VK_SQUARE=0` | Vulkan: in 16:9, no extra 4/3 columns for square pixels (races 960x720 instead of 1280x720 at 1.5x). |
+| `RECOMP_GL_SCALE_X` | Vulkan: a different horizontal scale (absolute; Resolution Scale keeps the ratio). |
 | `RECOMP_VK_CUBE=0` | Vulkan: no cube maps (car reflections off), whatever Options → Video says. |
 | `RECOMP_VK_HEADLESS=1` | Vulkan on Linux: no window (also implied by `SDL_VIDEODRIVER=offscreen`). |
 | `RECOMP_VK_VALIDATION=1` | Vulkan on Linux: Khronos validation layer. |

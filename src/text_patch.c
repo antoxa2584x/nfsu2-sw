@@ -40,6 +40,12 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
     { 0x822E4E9Bu, "1.5x" },                     /* "Motion Blur" */
     { 0xB55E7665u, "2x" },                       /* "Level Of Detail" */
     { 0xD3588630u, "2.5x" },                     /* "Widescreen" */
+    { 0x4CD775ACu, "Anti-Aliasing" },            /* "Full Screen Anti-Aliasing" */
+    { 0x4E57D355u, "Anisotropic" },              /* "Horizon Fog" */
+    { 0xA9C27DFDu, "Square Pixels" },            /* "Depth Of Field" */
+    { 0xA7A683ACu, "4x" },                       /* "Car Shadow" */
+    { 0x6F2C7417u, "8x" },                       /* "Light Trails" */
+    { 0x62925361u, "16x" },                      /* "Light Glow" */
 };
 
 static int s_switch_words;

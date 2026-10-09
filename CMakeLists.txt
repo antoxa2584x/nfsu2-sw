@@ -130,7 +130,7 @@ if(NINTENDO_SWITCH)
     # The release lives here, not in the cache: a cached default stays at
     # whatever the build directory was first configured with (the 0.4.5 NRO
     # said 0.4.3). -DNFSU2_SWITCH_VERSION_OVERRIDE=x sets another one.
-    set(NFSU2_SWITCH_VERSION "0.5")
+    set(NFSU2_SWITCH_VERSION "0.5.5")
     if(NFSU2_SWITCH_VERSION_OVERRIDE)
         set(NFSU2_SWITCH_VERSION "${NFSU2_SWITCH_VERSION_OVERRIDE}")
     endif()
