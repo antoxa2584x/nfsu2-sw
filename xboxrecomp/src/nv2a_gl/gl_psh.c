@@ -281,7 +281,7 @@ static void tex_fetch(Out *o, int t, uint32_t mode, const Nv2aPshKey *k)
     }
 }
 
-int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
+static int psh_emit(const Nv2aPshKey *k, char *buf, size_t cap, int alpha_test)
 {
     Out o = { buf, cap, 0 };
     uint32_t count = k->control & 0xFF;
@@ -357,8 +357,8 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         emit(&o, "    float fG = "); final_input(&o, cw1 >> 8, 1, k); emit(&o, ";\n");
         emit(&o, "    fragColor = vec4(fA * fB + (1.0 - fA) * fC + fD, fG);\n");
     }
-    emit(&o,
-        "    fragColor = clamp(fragColor, 0.0, 1.0);\n"
+    emit(&o, "    fragColor = clamp(fragColor, 0.0, 1.0);\n");
+    if (alpha_test) emit(&o,
         "    float ar = fragColor.a * 255.0;\n"
         "    bool pass = true;\n"
         "    if (u_alpha_func == 0x200) pass = false;\n"
@@ -368,7 +368,20 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "    else if (u_alpha_func == 0x204) pass = ar >  u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x205) pass = ar != u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x206) pass = ar >= u_alpha_ref;\n"
-        "    if (!pass) discard;\n"
-        "}\n");
+        "    if (!pass) discard;\n");
+    emit(&o, "}\n");
     return o.overflow ? -1 : (int)(cap - o.left);
+}
+
+int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
+{
+    return psh_emit(k, buf, cap, 1);
+}
+
+int nv2a_gl_psh_no_alpha_test(const Nv2aPshKey *k, char *buf, size_t cap)
+{
+    /* Same texture/combiner arithmetic, without a uniform-dependent kill.
+     * Clip-plane kills remain. Never force early tests for alpha-tested
+     * geometry: discarded fragments must not update depth or stencil. */
+    return psh_emit(k, buf, cap, 0);
 }

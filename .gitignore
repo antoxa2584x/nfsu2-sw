@@ -63,3 +63,7 @@ gen/
 
 # Per-game toolkit output (disassembly of the retail XBE)
 xboxrecomp/tools/*/output/
+
+/build-eu/
+/tests/switch_heap/results.json
+/tests/switch_heap/test_switch_heap

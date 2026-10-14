@@ -2815,7 +2815,7 @@ static int cull_env(const char *name, int dflt)
 }
 
 static struct {
-    int      on, check, stats;
+    int      on, check, stats, merge;
     uint64_t next_ms;
     uint32_t flips0;
     uint32_t draws, tested, culled, inelig_prog, inelig_attr, behind, check_bad;
@@ -3041,12 +3041,15 @@ static void cull_report(void)
             s_cull.draws ? (double)s_cull.verts / s_cull.draws : 0.0);
     s_cull.ns = s_cull.verts = 0;
     fprintf(stderr, "[cull] per frame: %u draws, %u tested, %u off screen%s; not tested: %u program, "
-            "%u attribute, %u behind the eye; check mismatches %u | same as previous: %u all, "
-            "%u but constants, %u but constants+vertices\n",
+            "%u attribute, %u behind the eye; check mismatches %u",
             s_cull.draws / frames, s_cull.tested / frames, s_cull.culled / frames,
             s_cull.on ? " (skipped)" : " (drawn)", s_cull.inelig_prog / frames,
-            s_cull.inelig_attr / frames, s_cull.behind / frames, s_cull.check_bad,
-            s_cull.same_all / frames, s_cull.same_but_consts / frames, s_cull.same_but_verts / frames);
+            s_cull.inelig_attr / frames, s_cull.behind / frames, s_cull.check_bad);
+    if (s_cull.merge)
+        fprintf(stderr, " | same as previous: %u all, %u but constants, %u but constants+vertices\n",
+                s_cull.same_all / frames, s_cull.same_but_consts / frames, s_cull.same_but_verts / frames);
+    else
+        fprintf(stderr, " | merge survey off\n");
     s_cull.draws = s_cull.tested = s_cull.culled = s_cull.inelig_prog = s_cull.inelig_attr = 0;
     s_cull.behind = s_cull.same_all = s_cull.same_but_consts = s_cull.same_but_verts = 0;
     s_cull.next_ms = now + 10000;
@@ -3101,6 +3104,9 @@ static int cull_batch(uint32_t lo, uint32_t nv)
         s_cull.on = cull_env("RECOMP_CULL", 1);
         s_cull.check = cull_env("RECOMP_CULL_CHECK", 0);
         s_cull.stats = cull_env("RECOMP_DRAW_STATS", 0);
+        /* Merge surveying hashes every index and copies/compares 8 KB per
+         * visible batch. It is diagnostics, not the actual instancing test. */
+        s_cull.merge = cull_env("RECOMP_DRAW_MERGE_STATS", 0);
     }
     if (s_cull.stats) {
         s_cull.draws++;
@@ -3134,7 +3140,7 @@ static int cull_batch(uint32_t lo, uint32_t nv)
             off = 0;
         }
     }
-    if (s_cull.stats && !off)
+    if (s_cull.stats && s_cull.merge && !off)
         cull_merge_stats(lo, nv);
     return off && s_cull.on;
 }

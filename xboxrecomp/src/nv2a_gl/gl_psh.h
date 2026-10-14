@@ -23,4 +23,8 @@ extern int nv2a_shader_vk;
 /* Fragment shader source for `k`. Returns bytes written, -1 on overflow. */
 int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap);
 
+/* Identical colour output for ALPHA_TEST_ENABLE=0 or ALPHA_FUNC=ALWAYS.
+ * Vulkan selects this module through a distinct pipeline key. */
+int nv2a_gl_psh_no_alpha_test(const Nv2aPshKey *k, char *buf, size_t cap);
+
 #endif

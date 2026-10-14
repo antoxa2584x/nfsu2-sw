@@ -29,10 +29,12 @@
 #include <unistd.h>
 
 #include "apu_xaudio2.h"
+#include "switch_heap.h"
 
 /* switch_saltynx.c: the frame rate for Status Monitor through SaltyNX. */
 void switch_saltynx_start(void);
 void switch_saltynx_stop(void);
+void xbox_SetConsoleLanguage(uint32_t language);
 
 #define NFSU2_SWITCH_DIR "sdmc:/switch/nfsu2x"
 
@@ -799,6 +801,16 @@ static u32 prof_off(u64 a)
     return a >= b && a - b < 0xFFFFFFFFull ? (u32)(a - b) : 0xFFFFFFFFu;
 }
 
+uint32_t nfsu2_switch_host_offset(const void *address)
+{
+    return prof_off((u64)(uintptr_t)address);
+}
+
+void nfsu2_switch_debug_flush(void)
+{
+    log_flush(1);
+}
+
 static void prof_flush(void)
 {
     FILE *f;
@@ -1187,10 +1199,41 @@ void switch_boot(void)
                         : "applet mode: launch via a game title (hold R) for full memory",
                (unsigned long)(total >> 20), (unsigned long)(used >> 20));
     }
-    clk_apply();
-    switch_saltynx_start();
-    loader_start();
-    prof_start();
+    nfsu2_switch_heap_report();
+    if (nfsu2_switch_heap_ready()) {
+#if defined(NFSU2_BUILD_EU)
+        u64 code = 0;
+        SetLanguage language;
+        u32 xbox_language = 1;
+        Result rc = setInitialize();
+        if (R_SUCCEEDED(rc)) {
+            rc = setGetSystemLanguage(&code);
+            if (R_SUCCEEDED(rc)) rc = setMakeLanguage(code, &language);
+            if (R_SUCCEEDED(rc)) {
+                switch (language) {
+                case SetLanguage_JA: xbox_language = 2; break;
+                case SetLanguage_DE: xbox_language = 3; break;
+                case SetLanguage_FR: case SetLanguage_FRCA: xbox_language = 4; break;
+                case SetLanguage_ES: case SetLanguage_ES419: xbox_language = 5; break;
+                case SetLanguage_IT: xbox_language = 6; break;
+                case SetLanguage_KO: xbox_language = 7; break;
+                case SetLanguage_ZHCN: case SetLanguage_ZHTW:
+                case SetLanguage_ZHHANS: case SetLanguage_ZHHANT: xbox_language = 8; break;
+                case SetLanguage_PT: case SetLanguage_PTBR: xbox_language = 9; break;
+                default: break;
+                }
+            }
+            setExit();
+        }
+        xbox_SetConsoleLanguage(xbox_language);
+        printf("[locale] Switch language=%016llX rc=0x%X; Xbox EEPROM language=%u; original chooser retained\n",
+               (unsigned long long)code, rc, xbox_language);
+#endif
+        clk_apply();
+        switch_saltynx_start();
+        loader_start();
+        prof_start();
+    }
 }
 
 void switch_error_dialog(const char *msg, const char *details)

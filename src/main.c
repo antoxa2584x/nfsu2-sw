@@ -28,6 +28,7 @@
 
 #ifdef __SWITCH__
 /* libnx lives in switch_nx.c: <switch.h> and the Win32 vocabulary collide. */
+#include "switch_heap.h"
 void switch_boot(void);
 void switch_shutdown(void);
 void switch_error_dialog(const char *msg, const char *details);
@@ -36,8 +37,12 @@ int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *mess
                              void *window);
 #endif
 
+#ifndef NFSU2_PACKED_REGISTERS
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
+#endif
+#ifndef NFSU2_PACKED_REGISTERS
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#endif
 extern ptrdiff_t g_xbox_mem_offset;
 extern volatile uint32_t g_icall_trace[16];
 extern volatile uint32_t g_icall_trace_idx;
@@ -66,7 +71,7 @@ extern void xbe_entry_point(void);
 extern int recomp_dispatch_init(void);
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
 
-#define NFSU2_ENTRY_POINT 0x0021B1CEu
+#include "game_region.h"
 
 
 #if defined(__SWITCH__)
@@ -273,6 +278,12 @@ int main(int argc, char **argv)
     (void)argc;
     (void)argv;
     switch_boot();
+    if (!nfsu2_switch_heap_ready()) {
+        fatal("Insufficient physical memory for Xbox shared mappings. "
+              "Use title takeover and see nfsu2x_log.txt.");
+        switch_shutdown();
+        return 1;
+    }
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 16u * 1024 * 1024);
     if (pthread_create(&th, &attr, game_thread, &rc) == 0)
@@ -325,6 +336,7 @@ static int game_main(void)
     /* Every periodic log line flushes to the SD card; keep the log to what
      * matters on a console. RECOMP_QUIET=0 in nfsu2x_env.txt brings it back. */
     setenv("RECOMP_QUIET", "1", 0);
+    setenv("RECOMP_NX_SHM", "1", 0);
 #endif
 
     game_dir = getenv("NFSU2_GAME_DIR");
@@ -340,6 +352,19 @@ static int game_main(void)
         return 1;
     }
     printf("XBE %s: %zu bytes\n", xbe_path, xbe_size);
+    Nfsu2Region detected = nfsu2_region_detect(xbe_data, xbe_size);
+    if (detected != nfsu2_build_region()) {
+        char message[256];
+        snprintf(message, sizeof message,
+                 "This %s build cannot run these %s game files. "
+                 "Use the matching region build and extracted disc.",
+                 nfsu2_region_name(nfsu2_build_region()), nfsu2_region_name(detected));
+        fatal(message);
+        free(xbe_data);
+        return 1;
+    }
+    printf("[BOOT] region=%s; matching translation selected at build time\n",
+           nfsu2_region_name(detected));
 
     if (!xbox_MemoryLayoutInit(xbe_data, xbe_size)) {
         fatal("Failed to initialise the Xbox memory layout "
@@ -361,7 +386,7 @@ static int game_main(void)
         const char *e = getenv("NFSU2_SIM_STEPS");
         float steps = e ? (float)atof(e) : 6.0f;
         if (steps >= 1.0f && steps <= 30.0f) {
-            float *cap = (float *)((uint8_t *)xbox_GetMemoryBase() + 0x3A4C64);
+            float *cap = (float *)((uint8_t *)xbox_GetMemoryBase() + nfsu2_sim_cap_address());
             if (*cap == 3.0f) {
                 *cap = steps;
                 printf("[BOOT] game time cap %.0f ms per frame\n", steps * 1000.0f / 60.0f);
@@ -403,14 +428,21 @@ static int game_main(void)
         nfsu2_nic_init();
     }
 
+    /* Picture options must be set before Vulkan creates its first surfaces. */
+    nfsu2_options_load();
+
 #ifndef _WIN32
     /* The GPU renderer (NFSU2_GL=0 falls back to the executor's CPU one). */
     {
         const char *gl = getenv("NFSU2_GL");
         if (!gl || strcmp(gl, "0") != 0) {
 #if defined(NFSU2_VULKAN)
-            extern void nv2a_vk_install(void);
-            nv2a_vk_install();
+            extern int nv2a_vk_initialize(void);
+            if (!nv2a_vk_initialize()) {
+                fatal("Vulkan initialization failed. See nfsu2x_log.txt. Startup stopped before the game.");
+                free(xbe_data);
+                return 1;
+            }
 #else
             extern void nv2a_gl_install(void);
             nv2a_gl_install();
@@ -421,7 +453,6 @@ static int game_main(void)
 
     xbox_kernel_init();
     nfsu2_text_patch_init();
-    nfsu2_options_load();
     xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
     xbox_kernel_bridge_init();
 
@@ -433,7 +464,7 @@ static int game_main(void)
 
     xbox_WatchdogStart();
 
-    printf("Starting guest at 0x%08X (esp=0x%08X)\n", NFSU2_ENTRY_POINT, g_esp);
+    printf("Starting guest at 0x%08X (esp=0x%08X)\n", nfsu2_entry_point(), g_esp);
     xbox_gil_mark_main();      /* the frame-rate thread (RECOMP_GIL_EAGER) */
     xbox_gil_enter();          /* guest code from here on (kernel_bridge.c) */
     xbe_entry_point();

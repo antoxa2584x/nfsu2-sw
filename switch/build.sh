@@ -14,6 +14,7 @@
 #   DEVKITPRO        default /opt/devkitpro (switch-dev, switch-sdl2, switch-mesa)
 #   XBOXRECOMP_DIR   toolkit (default: the vendored xboxrecomp/)
 #   NFSU2_GEN_DIR    lifted C from tools/regen.sh (default /root/nfsu2x/gen)
+#   NFSU2_REGION     US (default) or EU, matching the generated translation
 #   NFSU2_GAME_SRC   extracted disc to stage (default /root/nfsu2x/game)
 #   SD_ROOT          staging SD root (default <repo>/switch_sd)
 #   BUILD_DIR        default /root/nfsu2x/build-switch
@@ -38,16 +39,22 @@ GEN="${NFSU2_GEN_DIR:-/root/nfsu2x/gen}"
 GAME="${NFSU2_GAME_SRC:-/root/nfsu2x/game}"
 SD="${SD_ROOT:-$REPO/switch_sd}"
 VK="${VULKAN:-0}"
+REGION="${NFSU2_REGION:-US}"
+case "$REGION" in
+    US) REGION_SUFFIX= ;;
+    EU) REGION_SUFFIX=-eu ;;
+    *) echo "error: NFSU2_REGION must be US or EU" >&2; exit 1 ;;
+esac
 if [ "$VK" = "1" ]; then
-    BUILD="${BUILD_DIR:-/root/nfsu2x/build-switch-vk}"
-    NRO_NAME=nfsu2x-vulkan.nro
+    BUILD="${BUILD_DIR:-/root/nfsu2x/build-switch-vk$REGION_SUFFIX}"
+    NRO_NAME="nfsu2x$REGION_SUFFIX-vulkan.nro"
     NVK_SDK="${NVK_SDK:-/root/nfsu2x/mesa-sdk/usr/local}"
     GLSLANG_DIR="${GLSLANG_DIR:-/root/nfsu2x/glslang-switch}"
     VK_ARGS=(-DNFSU2_VULKAN=ON -DNVK_SDK="$NVK_SDK"
              -Dglslang_DIR="$GLSLANG_DIR/lib/cmake/glslang")
 else
-    BUILD="${BUILD_DIR:-/root/nfsu2x/build-switch}"
-    NRO_NAME=nfsu2x.nro
+    BUILD="${BUILD_DIR:-/root/nfsu2x/build-switch$REGION_SUFFIX}"
+    NRO_NAME="nfsu2x$REGION_SUFFIX.nro"
     VK_ARGS=(-DNFSU2_VULKAN=OFF)
 fi
 
@@ -81,7 +88,7 @@ fi
 cmake -S "$REPO" -B "$BUILD" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DXBOXRECOMP_DIR="$TK" -DNFSU2_GEN_DIR="$GEN" \
+    -DXBOXRECOMP_DIR="$TK" -DNFSU2_GEN_DIR="$GEN" -DNFSU2_REGION="$REGION" \
     -DNFSU2_SWITCH_ICON="$REPO/assets/icon.jpg" "${VK_ARGS[@]}" "${FF_ARGS[@]}" \
     "${LTO_ARGS[@]}" >/dev/null
 ninja -C "$BUILD" -j"$JOBS"

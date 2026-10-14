@@ -4,14 +4,14 @@
 
 ### Xbox static recompilation for Nintendo Switch and Linux
 
-The original Xbox (NTSC-U) release of **Need for Speed: Underground 2**, lifted
+The original Xbox (NTSC-U and PAL-EU) releases of **Need for Speed: Underground 2**, lifted
 instruction by instruction to C and running natively, with no emulator.
 
 ![Switch](https://img.shields.io/badge/Nintendo%20Switch-homebrew-E60012?logo=nintendoswitch&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.5.7-blue)
+![Version](https://img.shields.io/badge/version-0.5.9-blue)
 
 [Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
 
@@ -22,6 +22,18 @@ instruction by instruction to C and running natively, with no emulator.
 > [!IMPORTANT]
 > **No game data is included.** You need your own copy of the Xbox disc,
 > extracted (`default.xbe`, `NFSUNDER/`, ...).
+
+**Disc regions:** The shared source tree builds NTSC-U (default) or PAL-EU
+with `NFSU2_REGION=EU`. Each NRO contains one region's translation and needs
+the matching extracted disc; ISO files are not loaded directly. Startup
+detects mismatched game files before running the guest. See
+[PAL-EU setup and validation](pal/README.md). The game retains its normal
+language chooser.
+
+For EU Vulkan, start with **1.5x resolution, reflections On, anti-aliasing,
+texture filter and square pixels Off**. Video settings are also available
+from the pause menu. Higher-cost settings show a performance notice;
+stable 30 FPS is not guaranteed. See the [EU settings guide](pal/README.md#performance-baseline).
 
 ## ✨ Features
 
@@ -35,6 +47,8 @@ instruction by instruction to C and running natively, with no emulator.
   passes the game draws every race frame
 - 🔍 **Resolution Scale** in **Options → Video** (Vulkan): 1x, 1.5x
   (default), 2x, 2.5x, applied at once
+- **FPS Display** in **Options → Video** (Vulkan): an optional on-screen
+  counter, switched immediately and saved with the other port options
 - 🖼️ **Cleaner picture** (Vulkan): mipmaps with trilinear and anisotropic
   filtering, mipmapped car reflections, FXAA, square pixels in 16:9 races
   (1280x720 at 1.5x); **Anti-Aliasing**, **Anisotropic** (Off-16x) and

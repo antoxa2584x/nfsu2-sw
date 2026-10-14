@@ -16,12 +16,17 @@ find_package(glslang CONFIG REQUIRED)
 target_link_libraries(xbox_nv2a_vk PUBLIC glslang::glslang glslang::glslang-default-resource-limits)
 
 if(NINTENDO_SWITCH)
+    option(NVK_LOCALIZED_DISPATCH "Bridge a localized static NVK archive" OFF)
     set(NVK_SDK "" CACHE PATH "mesa-switch install prefix (holds lib/libvulkan.a, include/vulkan)")
     if(NOT EXISTS "${NVK_SDK}/lib/libvulkan.a")
         message(FATAL_ERROR "NVK_SDK must point at a mesa-switch install (no lib/libvulkan.a in '${NVK_SDK}')")
     endif()
     target_include_directories(xbox_nv2a_vk PUBLIC "${NVK_SDK}/include")
     target_sources(xbox_nv2a_vk PRIVATE switch_elf_stubs.c switch_egl_stubs.c)
+    if(NVK_LOCALIZED_DISPATCH)
+        target_sources(xbox_nv2a_vk PRIVATE switch_vk_dispatch.c)
+        target_compile_definitions(xbox_nv2a_vk PRIVATE NVK_LOCALIZED_DISPATCH=1)
+    endif()
     # Static NVK and what it needs; listed twice for archive rescanning.
     target_link_libraries(xbox_nv2a_vk PUBLIC
         "${NVK_SDK}/lib/libvulkan.a" expat z nx

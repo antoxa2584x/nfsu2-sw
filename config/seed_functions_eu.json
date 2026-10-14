@@ -1,0 +1,242 @@
+[
+  {
+    "start": "0x00093060",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0009326F",
+    "original_sha256": "860ff7d0a453c4fc395f9a5b33d179f7d06e843838e609cc27cfe1dc956c1797",
+    "calling_convention": "thiscall",
+    "stack_params": 1,
+    "num_instructions": 153,
+    "purpose": "race"
+  },
+  {
+    "start": "0x00257BC8",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00257D16",
+    "original_sha256": "2d936b02dcc2169d72ed64902f782e5301e70dd531a3a60d010179bc26969f6c",
+    "calling_convention": "cdecl",
+    "purpose": "io"
+  },
+  {
+    "start": "0x0026D98D",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0026E2D3",
+    "original_sha256": "d9d8062c4be54f3aabfbeaf84a8a766cf4f6beafa2ea869671da2cbcc94c8d50",
+    "calling_convention": "cdecl",
+    "stack_params": 3,
+    "num_instructions": 710,
+    "purpose": "movie"
+  },
+  {
+    "start": "0x0026E2D3",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0026E98F",
+    "original_sha256": "1806a4e155a31e8f35693235f3ebf4a2956630456c798796f227f9d84e2ab2e7",
+    "calling_convention": "cdecl",
+    "stack_params": 3,
+    "num_instructions": 513,
+    "purpose": "movie"
+  },
+  {
+    "start": "0x0026E9E3",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0026F0D4",
+    "original_sha256": "6be13998b710e92c0556a92a48b12be49d95e1f22c32cdafa70f5db9c8ab5ce3",
+    "calling_convention": "cdecl",
+    "stack_params": 3,
+    "num_instructions": 533,
+    "purpose": "movie"
+  },
+  {
+    "start": "0x0026F0D4",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0026F4DE",
+    "original_sha256": "ded167287fc16976a4bf1f2687b26bd34bdc1b3bd7c55c75cdaee238c4a968d6",
+    "calling_convention": "cdecl",
+    "stack_params": 3,
+    "num_instructions": 313,
+    "purpose": "movie"
+  },
+  {
+    "start": "0x00271A12",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00271A30",
+    "original_sha256": "ed0b63f106b436efa8ec6f3e2b11e93d3d271ac0234f802bf82c17a5a4730f65",
+    "calling_convention": "cdecl",
+    "stack_params": 0,
+    "num_instructions": 9,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x002724A6",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00272597",
+    "original_sha256": "e2215ada0d907c8960d5a750825f6ac267d149ea891e4af4faa9c71de2a920c3",
+    "calling_convention": "cdecl",
+    "stack_params": 1,
+    "num_instructions": 78,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x00272EE8",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00272FBA",
+    "original_sha256": "46a07fd6b0d283b03805834ecb0a3765eb6a67988b4924ed7c28df9e52f3a991",
+    "calling_convention": "cdecl",
+    "stack_params": 0,
+    "num_instructions": 76,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x00274625",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0027462A",
+    "original_sha256": "c05e6bba0d95debe1ad2ccac2040ce34099f0936d4bce5114f9d11644ae1c209",
+    "calling_convention": "cdecl",
+    "stack_params": 0,
+    "num_instructions": 1,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x00274667",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0027466C",
+    "original_sha256": "8d195aa88bd968934e32398c31ffe2f56e543151e944ffc5184e3e790f0b3dda",
+    "calling_convention": "cdecl",
+    "stack_params": 0,
+    "num_instructions": 1,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x00278BD7",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00278BDC",
+    "original_sha256": "23d546c7e83443cc512cc279c99108c33ad31574b70055b06fd9ded9e5b62c3f",
+    "calling_convention": "cdecl",
+    "stack_params": 0,
+    "num_instructions": 1,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x002797E0",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x002797E5",
+    "original_sha256": "f85b8ebc9b9712f568f8836b35bcff133e05e6a18b6dba31274dcb5cb7b6bbce",
+    "calling_convention": "cdecl",
+    "stack_params": 1,
+    "num_instructions": 1,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x002797E5",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x002797EA",
+    "original_sha256": "e395f2454ae942f0e59334c9db6ce41f8787bd1f1e00beaab453875df7884dbb",
+    "calling_convention": "cdecl",
+    "stack_params": 1,
+    "num_instructions": 1,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x0027CAB0",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0027CB70",
+    "original_sha256": "462887d6d5f9219bf19d5723b438c1da893332f624229c86eba06c3144a02cf1",
+    "calling_convention": "cdecl",
+    "stack_params": 2,
+    "num_instructions": 68,
+    "purpose": "audio"
+  },
+  {
+    "start": "0x00336F40",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033704C",
+    "original_sha256": "c06bcae467867939a7856d5167689ba32532c6692820740c52d174d2f2729204",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 95,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033777E",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x003377EA",
+    "original_sha256": "dd59982310aa5ee15fe9fb42adf5c3c9f0d61867af9b08bb564d30b369c93f6c",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 29,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x00337FE2",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x00338017",
+    "original_sha256": "0f2078208740a9a4ecccf104d1706ed85cdfdc6e0242e709e021397186bc7c16",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 19,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033B0F3",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033B145",
+    "original_sha256": "0c68873da8380724bfb66870794046ae10dfc240693966252755579c47f29a0d",
+    "calling_convention": "thiscall",
+    "stack_params": 0,
+    "num_instructions": 40,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033B145",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033B169",
+    "original_sha256": "b457424db9595cdaf3fd98dd256a355b1087ff321b8d22492a2b17dc936caecd",
+    "calling_convention": "thiscall",
+    "stack_params": 0,
+    "num_instructions": 17,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033B528",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033B563",
+    "original_sha256": "962bc2ae05f95cd8babbc7b60fefedc4609ae280495939e35ff6857e693ba7ce",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 20,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033BB47",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033BC9B",
+    "original_sha256": "461b91e2c63b3a77e8ab18d65ab59611b0af0e17570eda4b61b706641516466a",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 91,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0033C988",
+    "note": "Verified EU indirect callback from the existing PAL translation.",
+    "end": "0x0033CA6A",
+    "original_sha256": "62b16b984c92177d52e4d05f4c536a350f2900531181dc4b10cff9efa14e286c",
+    "calling_convention": "stdcall",
+    "stack_params": 1,
+    "num_instructions": 72,
+    "purpose": "xpp"
+  },
+  {
+    "start": "0x0021B70A",
+    "note": "EU worker/frontend callback entry."
+  },
+  {
+    "start": "0x002523BF",
+    "note": "EU worker/frontend callback entry."
+  },
+  {
+    "start": "0x002B1FB2",
+    "note": "EU worker/frontend callback entry."
+  }
+]

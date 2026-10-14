@@ -23,6 +23,11 @@ TK="${XBOXRECOMP_DIR:-$HERE/xboxrecomp}"
 XBE="${NFSU2_XBE:-/root/nfsu2x/game/default.xbe}"
 GEN="${NFSU2_GEN_DIR:-/root/nfsu2x/gen}"
 
+# EU uses its own callback metadata with the same toolkit/runtime sources.
+if [ "${NFSU2_REGION:-US}" = "EU" ]; then
+    exec python3 "$HERE/tools/regen.py" --xbe "$XBE" --region EU --gen-dir "$GEN" --toolkit "$TK"
+fi
+
 cd "$TK"
 if [ "${LIFT_ONLY:-0}" != "1" ]; then
     python3 -m tools.disasm "$XBE" --seed-functions "$HERE/config/seed_functions.json"
