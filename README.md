@@ -117,6 +117,7 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 | `config/seed_functions.json` | entry points the static pass cannot see |
 | `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A renderers (Vulkan, OpenGL), SDL audio, Switch platform layer, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
+| `tools/add_language.py` | French, German or Italian from the PAL disc for the USA build ([Languages](#-languages)) |
 | `switch/build.sh` | Switch NRO build + SD-card staging |
 
 ## ⚙️ Configuration
@@ -306,6 +307,23 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_FORCE_RETURN` | Read but currently has no effect. |
 
 </details>
+## 🌍 Languages
+
+The USA build plays in English. The PAL Europe disc has the text, in-game
+speech and cut-scenes of French, German and Italian; `tools/add_language.py`
+adds one of them to the extracted USA game, with no port change:
+
+```
+python3 tools/add_language.py --game sd/switch/nfsu2x/game --pal <PAL disc>.iso --language fr
+```
+
+It writes `NFSUNDER/ZZDATA10.BIN` (the language's files, as on the PAL disc),
+`ZZDATA11.BIN` (the two preloaded memory bundles with that language's speech
+index: with the English one the career freezes after its first cut-scene) and
+a `ZDIR.BIN` that points the English names at them. The USA `ZDIR.BIN` is kept
+as `ZDIR_english.BIN` to go back to English. Spanish, Dutch and Swedish have
+text on the disc but no speech.
+
 ## 🚦 Status
 
 | Platform | State |
