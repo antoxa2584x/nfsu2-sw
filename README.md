@@ -55,6 +55,9 @@ instruction by instruction to C and running natively, with no emulator.
 1. Copy the NRO to `sdmc:/switch/nfsu2x/` (`nfsu2x-vulkan.nro` for the Vulkan
    build).
 2. Copy the **extracted** disc (not the ISO) to `sdmc:/switch/nfsu2x/game/`.
+   `tools/make_sd.py` does steps 1 and 2 from the release zip and the disc
+   image: `python3 tools/make_sd.py --iso <USA disc>.iso --release nfsu2x.zip --out sd`
+   gives `sd/switch/nfsu2x/`, to copy to the root of the card.
 3. Start it with **title takeover**: hold **R** while launching any game.
    Applet mode leaves too little memory.
 
@@ -117,6 +120,7 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 | `config/seed_functions.json` | entry points the static pass cannot see |
 | `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A renderers (Vulkan, OpenGL), SDL audio, Switch platform layer, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
+| `tools/make_sd.py` | release zip + disc image → the SD card folder (`switch/nfsu2x/`) |
 | `switch/build.sh` | Switch NRO build + SD-card staging |
 
 ## ⚙️ Configuration
