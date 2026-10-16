@@ -11,7 +11,7 @@ instruction by instruction to C and running natively, with no emulator.
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
-![Version](https://img.shields.io/badge/version-0.5-blue)
+![Version](https://img.shields.io/badge/version-0.5.10-blue)
 
 [Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
 
@@ -30,14 +30,25 @@ instruction by instruction to C and running natively, with no emulator.
 - 🎮 **Two renderers**: Vulkan (NVK on Switch) and OpenGL, with render scaling
   up to 4x
 - 📺 **Widescreen 16:9** by default, using the game's own wide mode
+- 🪞 **Car reflections** (Vulkan), switchable in the game's
+  **Options → Video → Car Reflections**; Off also skips the six reflection
+  passes the game draws every race frame
+- 🔍 **Resolution Scale** in **Options → Video** (Vulkan): 1x, 1.5x
+  (default), 2x, 2.5x, applied at once
+- 🖼️ **Cleaner picture** (Vulkan): mipmaps with trilinear and anisotropic
+  filtering, mipmapped car reflections, FXAA, square pixels in 16:9 races
+  (1280x720 at 1.5x); **Anti-Aliasing**, **Anisotropic** (Off-16x) and
+  **Square Pixels** in **Options → Video**
 - 🎬 **Full-screen movies** decoded with FFmpeg (VP6)
 - 🔊 **Audio** through an emulated Xbox APU, with 5.1 downmixed to stereo
 - 👥 **Two-player split screen**, with Joy-Con pairs or one sideways Joy-Con
   per player
-- 📳 **Rumble** on Switch HD rumble and SDL controllers
+- 📳 **Rumble** on Switch HD rumble and SDL controllers, strength set in
+  **Options → Gameplay → Vibration** (Off, 10%-100%)
 - 🔤 **Switch wording** in the menus (Start → `+`, no Xbox Live or hard-disk
   names)
-- 💾 Saves stay next to the game in `game/UDATA`
+- 💾 Saves stay next to the game in `game/UDATA`; the **Options → Audio**
+  volumes (the Xbox game never saved them) are kept in `nfsu2x_options.txt`
 
 ## 🕹️ Playing on Switch
 
@@ -51,6 +62,8 @@ instruction by instruction to C and running natively, with no emulator.
 sdmc:/switch/nfsu2x/
 ├── nfsu2x-vulkan.nro
 ├── nfsu2x_env.txt      optional settings, KEY=VALUE per line
+├── nfsu2x_options.txt  written by the in-game options the port adds and
+│                       the Audio volumes
 └── game/
     ├── default.xbe
     └── ...
@@ -150,6 +163,7 @@ RECOMP_WIDESCREEN=0
 | `NFSU2_GL=0` | Use the executor's CPU renderer instead of the GPU renderer. |
 | `NFSU2_APU=0` | With `RECOMP_AC97_READY=plain`: no emulated APU (no sound). |
 | `NFSU2_SIM_STEPS` | Longest game-time step per frame, in 1/60 s (default 6 = 100 ms; 3 = the original 50 ms cap, which slows races below 20 fps). |
+| `NFSU2_FPS_CAP=30` | Keep the game's 30 fps cap in races and the open world (default: uncapped, up to 60 fps). |
 | `NFSU2_NATIVE_VP6` | Movie decoder: 1 = FFmpeg (default when built with it), 0 = the lifted decoder, 2 = both and compare. |
 | `NFSU2_MOVIE_FLASH=1` | Keep the opening trailer's white flash frames (shown black by default). |
 | `NFSU2_SWITCH_TEXT` | Switch wording in the menus (Start → +, no Xbox Live/hard-disk names): 1 on (Switch default), 0 off. |
@@ -206,7 +220,7 @@ RECOMP_WIDESCREEN=0
 | Variable | Meaning |
 |---|---|
 | `RECOMP_PB_EXEC` | Execute the NV2A pushbuffer (default 1; the title draws through it). |
-| `RECOMP_GL_SCALE` | Render resolution multiple, 0.5..4 (fractions allowed). |
+| `RECOMP_GL_SCALE` | Render resolution multiple, 0.5..4 (fractions allowed). Vulkan: only until Options → Video → Resolution Scale is changed (default there 1.5x). |
 | `RECOMP_GL_THREAD=1` | GL renderer: GL calls on their own thread. |
 | `RECOMP_GL_DIRECT=0` | Convert every vertex to float4 instead of uploading it as stored. |
 | `RECOMP_GL_DXT=0` | Decode DXT textures on the CPU instead of uploading them compressed. |
@@ -219,7 +233,13 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_GL_TRACE=1` | Shader sources and compile/link errors. |
 | `RECOMP_GL_FINISH=1` | Wait for the GPU after every operation (finds the call that hangs it). |
 | `RECOMP_FPS_LOG=1` | Presented frames per 10 s. |
-| `RECOMP_VK_CUBE=0` | Vulkan: no cube maps (car reflections off). |
+| `RECOMP_VK_MIPS=0` | Vulkan: no mipmaps (distant textures shimmer, the old look). |
+| `RECOMP_VK_ANISO` | Vulkan: anisotropic filtering, 1..16 (default 16; 1 = off). |
+| `RECOMP_VK_LOD_BIAS` | Vulkan: mip bias, negative = sharper (default -0.25). |
+| `RECOMP_VK_FXAA=0` | Vulkan: no FXAA (plain scaled blit to the screen). |
+| `RECOMP_VK_SQUARE=0` | Vulkan: in 16:9, no extra 4/3 columns for square pixels (races 960x720 instead of 1280x720 at 1.5x). |
+| `RECOMP_GL_SCALE_X` | Vulkan: a different horizontal scale (absolute; Resolution Scale keeps the ratio). |
+| `RECOMP_VK_CUBE=0` | Vulkan: no cube maps (car reflections off), whatever Options → Video says. |
 | `RECOMP_VK_HEADLESS=1` | Vulkan on Linux: no window (also implied by `SDL_VIDEODRIVER=offscreen`). |
 | `RECOMP_VK_VALIDATION=1` | Vulkan on Linux: Khronos validation layer. |
 | `RECOMP_VK_TRACE=<n>` | Vulkan: name every step of the first n draws/clears/flips. |

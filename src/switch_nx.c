@@ -30,6 +30,10 @@
 
 #include "apu_xaudio2.h"
 
+/* switch_saltynx.c: the frame rate for Status Monitor through SaltyNX. */
+void switch_saltynx_start(void);
+void switch_saltynx_stop(void);
+
 #define NFSU2_SWITCH_DIR "sdmc:/switch/nfsu2x"
 
 extern ptrdiff_t g_xbox_mem_offset;
@@ -924,15 +928,29 @@ static void prof_start(void)
  * The CPU is what limits this port: the game thread, the pushbuffer
  * executor and the GL/Vulkan thread are all CPU-bound. Through clkrst
  * (8.0.0+) or pcv, as sys-clk does; the old rates come back on exit. The
- * system resets clocks on dock/undock and after sleep, so a thread applies
- * them again every second while the game has focus. More heat and battery:
- * opt-in. sys-clk, when installed, may override them with its own profile. */
+ * system resets clocks on dock/undock, after sleep and when the game comes
+ * back from the HOME menu, so a thread applies them again every second
+ * while the game has focus, and every 250 ms for 5 s after any focus,
+ * dock or performance-mode change (applet hook). It runs at a high priority:
+ * at the lowest (0x3F) the busy guest threads (0x3B) on its core starved it
+ * and the clocks stayed at the system's after HOME. More heat and battery:
+ * opt-in.
+ *
+ * Clock managers (sys-clk "sys:clk", Horizon OC "hoc:clk") set clocks
+ * themselves -- Horizon OC puts stock rates back every tick when the game has
+ * no profile -- and fighting them every second froze consoles (issue #25).
+ * So: when one is running, the NFSU2_*_MHZ lines are ignored (the manager's
+ * profile rules; NFSU2_CLOCK_FORCE=1 overrides); a rate already at or above
+ * the request is left alone, at boot and later (never lower someone else's
+ * overclock); and a module that is put back more than 5 times in 30 s with
+ * no dock/focus/sleep change in between is given up to whoever does it. */
 static struct {
     const char *env, *name;
     PcvModule mod;
     PcvModuleId id;
     u32 cap_hz, want_hz, old_hz, set_hz;
-    int open;
+    int open, fights;
+    u64 fight_t0;
     ClkrstSession s;
 } s_clk[3] = {
     { "NFSU2_CPU_MHZ", "CPU", PcvModule_CpuBus, PcvModuleId_CpuBus, 1785000000u },
@@ -943,6 +961,8 @@ static int s_clk_rst = -1;                 /* 1 clkrst, 0 pcv, -1 not up */
 static volatile int s_clk_stop;
 static Thread s_clk_thread;
 static int s_clk_thread_up;
+static UEvent s_clk_wake;
+static AppletHookCookie s_clk_hook;
 
 static Result clk_get(int i, u32 *hz)
 {
@@ -971,12 +991,28 @@ static u32 clk_pick(int i, u32 want)
     return best ? best : want;
 }
 
+/* Is another process serving this name? (sys-clk's own check: registering
+ * it fails with "already registered".) Any other refusal counts as no. */
+static int clk_service_running(const char *name)
+{
+    Handle h;
+    Result rc = smRegisterService(&h, smEncodeName(name), false, 1);
+    if (R_SUCCEEDED(rc)) {
+        smUnregisterService(smEncodeName(name));
+        svcCloseHandle(h);
+        return 0;
+    }
+    return rc == MAKERESULT(21, 4);       /* sm: AlreadyRegistered */
+}
+
 static void clk_restore(void)
 {
     int i;
     if (s_clk_rst < 0)
         return;
     s_clk_stop = 1;
+    appletUnhook(&s_clk_hook);
+    ueventSignal(&s_clk_wake);
     if (s_clk_thread_up) {
         threadWaitForExit(&s_clk_thread);
         threadClose(&s_clk_thread);
@@ -995,18 +1031,55 @@ static void clk_restore(void)
     s_clk_rst = -1;
 }
 
+/* Runs on the thread that pumps applet messages (SDL's event loop). */
+static void clk_hook(AppletHookType hook, void *param)
+{
+    (void)param;
+    if (hook == AppletHookType_OnFocusState || hook == AppletHookType_OnOperationMode
+        || hook == AppletHookType_OnPerformanceMode || hook == AppletHookType_OnResume)
+        ueventSignal(&s_clk_wake);
+}
+
 static void clk_keeper(void *arg)
 {
-    unsigned logged = 0;
+    unsigned logged = 0, fast = 0;
+    u64 freq = armGetSystemTickFreq();
     (void)arg;
     while (!s_clk_stop) {
-        svcSleepThread(1000000000ull);
+        if (R_SUCCEEDED(waitSingle(waiterForUEvent(&s_clk_wake),
+                                   fast ? 250000000ull : 1000000000ull)))
+            fast = 20;
+        else if (fast)
+            fast--;
         if (s_clk_stop || appletGetFocusState() != AppletFocusState_InFocus)
             continue;
         for (int i = 0; i < 3; i++) {
             u32 hz = 0;
+            u64 now;
             if (!s_clk[i].set_hz || R_FAILED(clk_get(i, &hz)) || hz == s_clk[i].set_hz)
                 continue;
+            if (hz > s_clk[i].set_hz) {
+                printf("[clock] %s raised to %u MHz by someone else: left to them\n",
+                       s_clk[i].name, hz / 1000000u);
+                s_clk[i].set_hz = 0;
+                continue;
+            }
+            /* The system's own resets come with an applet event (fast > 0);
+             * a reset without one is another program setting clocks. */
+            now = armGetSystemTick();
+            if (!fast) {
+                if (!s_clk[i].fights || now - s_clk[i].fight_t0 > 30 * freq) {
+                    s_clk[i].fights = 0;
+                    s_clk[i].fight_t0 = now;
+                }
+                if (++s_clk[i].fights > 5) {
+                    printf("[clock] %s keeps going back to %u MHz: another clock tool "
+                           "is running, leaving %s to it\n", s_clk[i].name, hz / 1000000u,
+                           s_clk[i].name);
+                    s_clk[i].set_hz = 0;
+                    continue;
+                }
+            }
             clk_set(i, s_clk[i].set_hz);
             if (logged++ < 8)
                 printf("[clock] %s was reset to %u MHz, back to %u MHz\n", s_clk[i].name,
@@ -1028,6 +1101,16 @@ static void clk_apply(void)
     }
     if (!any)
         return;
+    {
+        const char *f = getenv("NFSU2_CLOCK_FORCE");
+        const char *tool = clk_service_running("hoc:clk") ? "Horizon OC"
+                         : clk_service_running("sys:clk") ? "sys-clk" : NULL;
+        if (tool && !(f && *f == '1')) {
+            printf("[clock] %s is running: NFSU2_*_MHZ ignored, set clocks in its "
+                   "profile (NFSU2_CLOCK_FORCE=1 overrides)\n", tool);
+            return;
+        }
+    }
     if (hosversionAtLeast(8, 0, 0) && R_SUCCEEDED(clkrstInitialize()))
         s_clk_rst = 1;
     else if (R_SUCCEEDED(pcvInitialize()))
@@ -1050,6 +1133,11 @@ static void clk_apply(void)
         }
         clk_get(i, &s_clk[i].old_hz);
         hz = clk_pick(i, s_clk[i].want_hz);
+        if (s_clk[i].old_hz >= hz) {
+            printf("[clock] %s already at %u MHz (asked %u): left alone\n", s_clk[i].name,
+                   s_clk[i].old_hz / 1000000u, s_clk[i].want_hz / 1000000u);
+            continue;
+        }
         rc = clk_set(i, hz);
         clk_get(i, &now);
         if (R_SUCCEEDED(rc))
@@ -1059,7 +1147,9 @@ static void clk_apply(void)
                R_FAILED(rc) ? " -- refused" : "");
     }
     atexit(clk_restore);
-    if (R_SUCCEEDED(threadCreate(&s_clk_thread, clk_keeper, NULL, NULL, 0x4000, 0x3F, -2))
+    ueventCreate(&s_clk_wake, true);
+    appletHook(&s_clk_hook, clk_hook, NULL);
+    if (R_SUCCEEDED(threadCreate(&s_clk_thread, clk_keeper, NULL, NULL, 0x4000, 0x2C, -2))
         && R_SUCCEEDED(threadStart(&s_clk_thread)))
         s_clk_thread_up = 1;
 }
@@ -1098,6 +1188,7 @@ void switch_boot(void)
                (unsigned long)(total >> 20), (unsigned long)(used >> 20));
     }
     clk_apply();
+    switch_saltynx_start();
     loader_start();
     prof_start();
 }
@@ -1124,6 +1215,7 @@ void switch_error_dialog(const char *msg, const char *details)
 
 void switch_shutdown(void)
 {
+    switch_saltynx_stop();
     clk_restore();
     log_flush(1);
     socketExit();

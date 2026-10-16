@@ -69,7 +69,10 @@ def test_loop_head_inherits_flags_from_both_predecessors():
 
 def test_disagreeing_predecessors_keep_the_fallback():
     # Two predecessors reach the jz: one after `sub`, one after `inc`, whose
-    # flags come from a different operand. The join must refuse.
+    # flags come from a different operand. The join must not merge them into
+    # one guessed state; each predecessor computes its own ZF into a variable
+    # instead (translator.py _materialised_joins). The `_flags` fallback this
+    # used to keep was a constant: the jz never branched.
     #   +0  sub eax, ecx
     #   +2  jmp +3            -> the jz at +5
     #   +4  inc edx           (falls through to the jz, different flag source)
@@ -81,7 +84,8 @@ def test_disagreeing_predecessors_keep_the_fallback():
              b"\x74\x00"          # jz +0 -> +7
              b"\xC3")             # ret
     code = _translate(image)
-    assert "_flags /*" in code, code
+    assert "_flags /*" not in code, code
+    assert code.count("/* flags for loc_") == 2, code
 
 
 if __name__ == "__main__":

@@ -1986,6 +1986,11 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
     fclose(f);
 }
 
+/* The host's per-frame hook (switch_saltynx.c: the frame rate for SaltyNX
+ * overlays), with the rendered picture's size. Weak and undefined
+ * elsewhere: the call is skipped. */
+extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
+
 static void gl_flip(void)
 {
     state_dirty();
@@ -2129,6 +2134,8 @@ static void gl_flip(void)
 swap:
     gl_step_done("present");
     SDL_GL_SwapWindow(s_win);
+    if (nv2a_host_frame_presented)
+        nv2a_host_frame_presented(s && s_drew_any ? s->pw : 0, s && s_drew_any ? s->ph : 0);
     gl_step_done("swap");
     tex_bind_forget();
 #if !defined(__APPLE__)        /* AppKit events are pumped by the host's main thread */

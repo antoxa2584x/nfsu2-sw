@@ -505,15 +505,46 @@ void recomp_trace_esp(const char *name, const char *tag);
 uint32_t xbox_mmio_read(uint32_t va, unsigned size);
 void     xbox_mmio_write(uint32_t va, uint32_t val, unsigned size);
 #define XBOX_IS_MMIO(addr) ((uint32_t)(addr) >= XBOX_MMIO_BASE)
-#define MMIO_RD8(addr)  (XBOX_IS_MMIO(addr) ? (uint8_t)xbox_mmio_read((uint32_t)(addr), 1) : MEM8(addr))
-#define MMIO_RD16(addr) (XBOX_IS_MMIO(addr) ? (uint16_t)xbox_mmio_read((uint32_t)(addr), 2) : MEM16(addr))
-#define MMIO_RD32(addr) (XBOX_IS_MMIO(addr) ? xbox_mmio_read((uint32_t)(addr), 4) : MEM32(addr))
+
+/* The tiled framebuffer aperture: 0xF0000000-0xF7FFFFFF is another view of
+ * the contiguous window (0x80000000 + the low 64 MB). Hosts that can alias
+ * memory map it as such. Horizon cannot ("[NX] second view of a mapping
+ * refused"), so nothing is mapped there and a write faulted -- NFS Carbon's
+ * D3DX copies surfaces into it (exception 257 at guest 0xF3E96000). The
+ * device-aware functions fold it onto the contiguous window instead, which
+ * is the copy the pushbuffer executor reads. */
+#define XBOX_DEV_FOLD(addr) \
+    ((uint32_t)((uint32_t)(addr) - 0xF0000000u < 0x08000000u \
+        ? (0x80000000u | ((uint32_t)(addr) & 0x03FFFFFFu)) : (uint32_t)(addr)))
+#define XBOX_DEV_PTR(addr) XBOX_PTR(XBOX_DEV_FOLD(addr))
+#define DEV_MEMF(addr)   MEMF(XBOX_DEV_FOLD(addr))
+#define DEV_MEMD(addr)   MEMD(XBOX_DEV_FOLD(addr))
+#define DEV_SMEM64(addr) SMEM64(XBOX_DEV_FOLD(addr))
+
+/* SSE float -> int32 (cvtss2si / cvtsd2si and the truncating cvtt*):
+ * round to nearest (the MXCSR default) or toward zero; NaN and values
+ * outside int32 give the integer indefinite 0x80000000, as on x86. */
+static inline int32_t recomp_cvt_si(double x, int round_nearest)
+{
+    if (round_nearest)
+        x = __builtin_rint(x);
+    else
+        x = __builtin_trunc(x);
+    if (!(x >= -2147483648.0 && x <= 2147483647.0))
+        return (int32_t)0x80000000u;
+    return (int32_t)x;
+}
+#define RECOMP_CVT_SI(v, rnd) recomp_cvt_si((double)(v), (rnd))
+
+#define MMIO_RD8(addr)  (XBOX_IS_MMIO(addr) ? (uint8_t)xbox_mmio_read((uint32_t)(addr), 1) : MEM8(XBOX_DEV_FOLD(addr)))
+#define MMIO_RD16(addr) (XBOX_IS_MMIO(addr) ? (uint16_t)xbox_mmio_read((uint32_t)(addr), 2) : MEM16(XBOX_DEV_FOLD(addr)))
+#define MMIO_RD32(addr) (XBOX_IS_MMIO(addr) ? xbox_mmio_read((uint32_t)(addr), 4) : MEM32(XBOX_DEV_FOLD(addr)))
 #define MMIO_WR8(addr, v)  do { uint32_t _ma = (uint32_t)(addr); uint8_t _mv = (uint8_t)(v); \
-    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 1); else MEM8(_ma) = _mv; } while (0)
+    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 1); else MEM8(XBOX_DEV_FOLD(_ma)) = _mv; } while (0)
 #define MMIO_WR16(addr, v) do { uint32_t _ma = (uint32_t)(addr); uint16_t _mv = (uint16_t)(v); \
-    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 2); else MEM16(_ma) = _mv; } while (0)
+    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 2); else MEM16(XBOX_DEV_FOLD(_ma)) = _mv; } while (0)
 #define MMIO_WR32(addr, v) do { uint32_t _ma = (uint32_t)(addr); uint32_t _mv = (uint32_t)(v); \
-    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 4); else MEM32(_ma) = _mv; } while (0)
+    if (XBOX_IS_MMIO(_ma)) xbox_mmio_write(_ma, _mv, 4); else MEM32(XBOX_DEV_FOLD(_ma)) = _mv; } while (0)
 
 /* ================================================================
  * SSE / XMM register state

@@ -23,11 +23,13 @@ from tools.disasm.functions import FunctionDetector  # noqa: E402
 
 
 class _Insn:
-    def __init__(self, addr, size, is_ret=False):
+    def __init__(self, addr, size, is_ret=False, jcc_to=None):
         self.address = addr
         self.size = size
         self.end_address = addr + size
         self.is_ret = is_ret
+        self.is_cond_jump = jcc_to is not None
+        self.jump_target = jcc_to
 
 
 class _Section:
@@ -167,4 +169,24 @@ class SehPrologueShapeTest(unittest.TestCase):
     def test_a_single_immediate_push_is_not(self):
         code = bytes.fromhex("6a18") + bytes.fromhex("c3") + bytes([0x90]) * 8
         self.assertFalse(self._probe(code))
+
+class GapPrologueTailTest(unittest.TestCase):
+    """NFS Carbon's sub_001A7E00: ret mid-body at 0x1A7E55, then a tail at
+    0x1A7E56 (`push esi`) reached by its `jne`. Both follow a ret in a gap,
+    in the same pass; the tail must not become a function (it cut the body,
+    and a `je` to its `pop edi; ret` went to a stub)."""
+
+    def test_jcc_target_of_a_candidate_above_is_a_tail(self):
+        insns = [_Insn(0x001A7DFF, 1, is_ret=True),
+                 _Insn(0x001A7E43, 2, jcc_to=0x001A7E56),
+                 _Insn(0x001A7E55, 1, is_ret=True)]
+        det = _detector(insns, [], [0x001A7E00, 0x001A7E56])
+        self.assertTrue(det._pass_gap_prologues([]))
+        self.assertEqual([a for a, _ in det.added], [0x001A7E00])
+
+    def test_jcc_from_a_known_body_is_a_tail(self):
+        insns = [_Insn(0x00400010, 2, jcc_to=0x00400031),
+                 _Insn(0x00400030, 1, is_ret=True)]
+        det = _detector(insns, [_Func(0x00400000, 0x00400020)], [0x00400031])
+        self.assertFalse(det._pass_gap_prologues([]))
 

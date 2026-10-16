@@ -403,6 +403,25 @@ void sub_002F1D80(void)
  * it (nv2a_pb_exec.c). */
 extern void sub_002F22F0_gen(void);
 extern void nv2a_pb_trap_lock(void);
+/* The frame-rate cap. Present (sub_002EB4B0/sub_002EB6A0) turns D3D's
+ * presentation interval (0x2F76FC: 1, 2, 4 vblanks, bit 31 = flip at once
+ * when late) into a NOP trap word, (bits << 5) | 1 -- bits 0..2 = 1/2/3
+ * for 1/2/4 vblanks, bit 3 = immediate -- and the flip queue (sub_002F2080,
+ * case 1) schedules the flip that many vblanks after the last one. NFSU2
+ * asks for 2 in races and the open world: 30 fps at most. The wrapper
+ * rewrites the interval to 1 as the trap is taken, so a frame ready in time
+ * shows on the next vblank (60 fps at most); slower frames are unchanged.
+ * NFSU2_FPS_CAP=30 keeps the title's interval. */
+static int fps_cap_30(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("NFSU2_FPS_CAP");
+        v = e && atoi(e) == 30;
+        fprintf(stderr, "[fps] race/open-world cap: %s\n", v ? "30 (title)" : "60 (NFSU2_FPS_CAP=30 for 30)");
+    }
+    return v;
+}
 extern void nv2a_pb_trap_unlock(void);
 extern void nv2a_pb_trap_taken(void);
 
@@ -416,6 +435,15 @@ void sub_002F22F0(void)
 
     nv2a_pb_trap_lock();
     nsource = nv[0x400108 / 4];
+    if (nsource && (nv[0x400704 / 4] & 0xFFFFu) == 0x0100u && !fps_cap_30()) {
+        uint32_t data = nv[0x400708 / 4];
+        if ((data & 0x1Fu) == 1u && ((data >> 5) & 7u) > 1u) {
+            static int told;
+            nv[0x400708 / 4] = (data & ~(7u << 5)) | (1u << 5);   /* flip: 1 vblank */
+            if (!told++)
+                fprintf(stderr, "[fps] flip interval %u -> 1 vblank (uncapped)\n", (data >> 5) & 7u);
+        }
+    }
     sub_002F22F0_gen();
     nv2a_pb_flip_retired(MEM32(blk + 0x1BC) - head);   /* a flip queued on its vblank retires at once */
     if (nsource)
@@ -1644,6 +1672,477 @@ void sub_0033518D(void)
     POP32(esp, ebp_saved);
     g_ebp = ebp_saved;
     esp += 4;
+}
+
+/* ── Options -> Video: Car Reflections, Resolution Scale, picture ─
+ *
+ * The Xbox Video screen (sub_000CE8D0, options category 1 at 0x406CC4)
+ * holds only the Screen Size slider. The port's own settings are appended
+ * as rows built like the Gameplay screen's (sub_000CEA00): 0x54 bytes,
+ * sub_0012AF20 constructor, added with sub_0015B2E0 -- the Player screen
+ * (sub_000CF960) mixes sliders and such rows too. Each row's class is a
+ * copy of the Speedometer Units row's vtable (0x34EFD0) in memory of our
+ * own, so the two methods that know the setting, the input handler (vt+4,
+ * sub_000B5140: left/right flips byte 0x406CDA) and the refresh (vt+0xC,
+ * sub_000B51A0: label + value text), can tell our rows by their vtable.
+ * Their texts are PC-only strings the Xbox never shows, renamed by
+ * text_patch.c (s_always); On/Off are Jump Camera's.
+ *
+ * Car Reflections Off does two things: the renderer's cube stages sample
+ * black (nv2a_vk_cube_maps, Vulkan only; GL never drew them), and the
+ * title stops rendering its dynamic cube map. Six "EnvMap %d" views, one
+ * per cube face (set up by sub_000A3BC0, pointers at 0x3F2AD0), are drawn
+ * by the race render loop in sub_000ADF60 only while their byte at +8 is
+ * set. The PC's update-rate scheduler, sub_0009B720 (thiscall on that
+ * table, every frame before the render), sets those bytes from a schedule
+ * (rows of six at 0x39CE20, row = frame % [0x39CE18]); after it, Off
+ * clears all six.
+ *
+ * Resolution Scale (Vulkan build only): 1x, 1.5x (default), 2x, 2.5x,
+ * handed to the renderer as nv2a_vk_scale_pct, applied at its next flip
+ * (nv2a_vk.c rescale_surfaces). Without a saved value RECOMP_GL_SCALE
+ * still decides, and the row shows the nearest step.
+ *
+ * Picture rows (Vulkan build only; renderer: nv2a_vk.c): Anti-Aliasing =
+ * FXAA in the present pass (nv2a_vk_fxaa); Anisotropic = Off/2x/4x/8x/16x
+ * on the title's mipmapped textures (nv2a_vk_aniso); Square Pixels = in
+ * 16:9, 4/3 more columns on surfaces without horizontal AA (races 1280x720
+ * at 1.5x instead of 960x720; nv2a_vk_square, applied at the next flip).
+ * The renderer's env switches still force each one off.
+ *
+ * Kept in nfsu2x_options.txt (sdmc:/switch/nfsu2x/ on the Switch, the
+ * working directory elsewhere; reflections=, scale=, fxaa=, aniso=,
+ * square=), not in the game profile; loaded at boot
+ * (nfsu2_options_load, main.c). RECOMP_VK_CUBE=0 still forces the
+ * reflections off in the renderer.
+ *
+ * Options -> Gameplay (sub_000CEA00, same row recipe) gets Vibration:
+ * Off, 10% .. 100% (default), scaling both motors of every rumble report
+ * (usb_gamepad_rumble_pct, usb_gamepad.c); vibration= in the same file.
+ *
+ * Options -> Audio volumes (issue #21): the Xbox never keeps them. They
+ * are floats in the options object at 0x406CA0 (+0x48..+0x83, the block
+ * at 0x406CE8 the audio manager [0x391F84] gets in sub_00076A70), and the
+ * profile writer sub_001371B0 copies the object in pieces around that
+ * block; nothing reads them back on load either. So they live in the same
+ * file (menu_music= .. engine=, 0..1): written into the block when the
+ * profile is first applied, saved when a slider hands the block to
+ * sub_00076A70 with a changed value. */
+#ifdef __SWITCH__
+#  define NFSU2_OPTIONS_FILE "sdmc:/switch/nfsu2x/nfsu2x_options.txt"
+#else
+#  define NFSU2_OPTIONS_FILE "nfsu2x_options.txt"
+#endif
+#define FE_PAD_LEFT     0x9120409Eu
+#define FE_PAD_RIGHT    0xB5971BF1u
+#define ROW_VTABLE      0x0034EFD0u     /* Speedometer Units */
+#define ROW_VTABLE_SIZE 0x48u
+#define ENVMAP_TABLE    0x003F2AD0u     /* six cube-face view pointers */
+#define AUDIO_VOLUMES   0x00406CE8u     /* options object +0x48 */
+
+#ifdef NFSU2_VULKAN
+extern volatile int nv2a_vk_cube_maps;
+extern volatile int nv2a_vk_scale_pct;
+extern volatile int nv2a_vk_fxaa;
+extern volatile int nv2a_vk_aniso;
+extern volatile int nv2a_vk_square;
+#endif
+extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+extern volatile int usb_gamepad_rumble_pct;
+extern void sub_000CE8D0_gen(void);
+extern void sub_000CEA00_gen(void);
+extern void sub_000B5140_gen(void);
+extern void sub_000B51A0_gen(void);
+extern void sub_0009B720_gen(void);
+extern void sub_00076A70_gen(void);
+
+static const int s_scale_pct[] = { 100, 150, 200, 250 };
+static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
+
+/* Options -> Audio rows, top to bottom. */
+static const struct { const char *key; uint32_t va; } s_vol_rows[] = {
+    { "menu_music", 0x00406CF0u }, { "game_music", 0x00406CF4u },
+    { "speech", 0x00406CECu }, { "sfx", 0x00406CF8u },
+    { "tires", 0x00406D00u }, { "engine", 0x00406CFCu },
+};
+#define N_VOLS ((int)(sizeof s_vol_rows / sizeof s_vol_rows[0]))
+static float s_vol[N_VOLS];             /* from the file, then as last saved */
+static int s_vol_have[N_VOLS];          /* s_vol[i] is known */
+static int s_vol_ready;                 /* the title has applied the block */
+
+static int s_refl = 1;                  /* 0 off, 1 on */
+static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
+static int s_scale_saved;               /* nfsu2x_options.txt had scale= */
+static int s_fxaa = 1;                  /* 0 off, 1 on */
+static int s_aniso_idx = 4;             /* into s_aniso_lvl: 16x */
+static int s_square = 1;                /* 0 off, 1 on */
+static int s_vib_idx = 10;              /* vibration in 10% steps: 100% */
+
+typedef struct {
+    uint32_t label;                     /* text hashes, see text_patch.c */
+    const uint32_t *texts;
+    int n;
+    int *value;
+    void (*changed)(void);
+    uint32_t vtable;                    /* guest copy of ROW_VTABLE */
+    int gameplay;                       /* on the Gameplay screen, not Video */
+} OptRow;
+
+static void refl_changed(void)
+{
+#ifdef NFSU2_VULKAN
+    nv2a_vk_cube_maps = s_refl;
+#endif
+}
+
+static void vib_changed(void)
+{
+    usb_gamepad_rumble_pct = s_vib_idx * 10;
+}
+
+#ifdef NFSU2_VULKAN
+static void scale_changed(void)
+{
+    nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
+    s_scale_saved = 1;
+}
+
+static void picture_changed(void)
+{
+    nv2a_vk_fxaa = s_fxaa;
+    nv2a_vk_aniso = s_aniso_lvl[s_aniso_idx];
+    nv2a_vk_square = s_square;
+}
+#endif
+
+static const uint32_t s_refl_texts[] = { 0x0000CCFAu, 0x0000063Cu };    /* Off, On */
+static const uint32_t s_scale_texts[] = {
+    0x2A2A4AB3u, 0x822E4E9Bu, 0xB55E7665u, 0xD3588630u,                 /* 1x .. 2.5x */
+};
+static const uint32_t s_aniso_texts[] = {
+    0x0000CCFAu, 0xB55E7665u, 0xA7A683ACu, 0x6F2C7417u, 0x62925361u,    /* Off, 2x .. 16x */
+};
+static const uint32_t s_vib_texts[] = {
+    0x0000CCFAu, 0x06CC3750u, 0x612AF8A6u, 0x632B8DA7u, 0x130D90D1u,    /* Off, 10% .. 40% */
+    0xBDE2E94Bu, 0x2522A4E9u, 0xF6A08779u, 0x4DEAB931u, 0x92423B95u,    /* 50% .. 90% */
+    0x14D4BD3Bu,                                                        /* 100% */
+};
+static OptRow s_rows[] = {
+    { 0x8FE9288Eu, s_refl_texts, 2, &s_refl, refl_changed, 0, 0 },     /* Car Reflections */
+#ifdef NFSU2_VULKAN
+    { 0x4AC50BCFu, s_scale_texts, 4, &s_scale_idx, scale_changed, 0, 0 }, /* Resolution Scale */
+    { 0x4CD775ACu, s_refl_texts, 2, &s_fxaa, picture_changed, 0, 0 },  /* Anti-Aliasing */
+    { 0x4E57D355u, s_aniso_texts, 5, &s_aniso_idx, picture_changed, 0, 0 }, /* Anisotropic */
+    { 0xA9C27DFDu, s_refl_texts, 2, &s_square, picture_changed, 0, 0 }, /* Square Pixels */
+#endif
+    { 0x5CF08EB7u, s_vib_texts, 11, &s_vib_idx, vib_changed, 0, 1 },   /* Vibration */
+};
+#define N_ROWS ((int)(sizeof s_rows / sizeof s_rows[0]))
+
+static void options_log(void)
+{
+#ifdef NFSU2_VULKAN
+    fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s, anti-aliasing %s,"
+            " anisotropic %dx, square pixels %s, vibration %d%%\n",
+            s_refl ? "on" : "off", s_scale_pct[s_scale_idx],
+            nv2a_vk_scale_pct ? "" : " (RECOMP_GL_SCALE)", s_fxaa ? "on" : "off",
+            s_aniso_lvl[s_aniso_idx], s_square ? "on" : "off", s_vib_idx * 10);
+#else
+    fprintf(stderr, "[options] car reflections %s, vibration %d%%\n",
+            s_refl ? "on" : "off", s_vib_idx * 10);
+#endif
+}
+
+void nfsu2_options_load(void)
+{
+    char line[128];
+    FILE *f = fopen(NFSU2_OPTIONS_FILE, "r");
+    int i;
+
+    if (f) {
+        while (fgets(line, sizeof line, f)) {
+            char *eq = strchr(line, '=');
+            for (i = 0; i < N_VOLS && eq; i++)
+                if ((size_t)(eq - line) == strlen(s_vol_rows[i].key) &&
+                    !strncmp(line, s_vol_rows[i].key, (size_t)(eq - line))) {
+                    double v = strtod(eq + 1, NULL);
+                    s_vol[i] = (float)(v < 0.0 ? 0.0 : v > 1.0 ? 1.0 : v);
+                    s_vol_have[i] = 1;
+                }
+            if (!strncmp(line, "reflections=", 12))
+                s_refl = line[12] != '0';
+            else if (!strncmp(line, "fxaa=", 5))
+                s_fxaa = line[5] != '0';
+            else if (!strncmp(line, "vibration=", 10)) {
+                int v = atoi(line + 10);
+                s_vib_idx = v < 0 ? 0 : v > 100 ? 10 : (v + 5) / 10;
+            }
+            else if (!strncmp(line, "square=", 7))
+                s_square = line[7] != '0';
+            else if (!strncmp(line, "aniso=", 6)) {
+                int a = atoi(line + 6);
+                for (i = 0; i < 5; i++)
+                    if (s_aniso_lvl[i] == a)
+                        s_aniso_idx = i;
+            }
+            else if (!strncmp(line, "scale=", 6)) {
+                int pct = atoi(line + 6);
+                for (i = 0; i < 4; i++)
+                    if (s_scale_pct[i] == pct) {
+                        s_scale_idx = i;
+                        s_scale_saved = 1;
+                    }
+            }
+        }
+        fclose(f);
+    }
+    refl_changed();
+    vib_changed();
+#ifdef NFSU2_VULKAN
+    {
+        const char *e = getenv("RECOMP_GL_SCALE");
+        if (!s_scale_saved && e && *e) {
+            /* RECOMP_GL_SCALE stays in charge until the option is changed;
+             * the row shows the nearest step. */
+            double k = strtod(e, NULL), best = 1e9;
+            for (i = 0; i < 4; i++) {
+                double d = fabs(k * 100.0 - s_scale_pct[i]);
+                if (d < best) { best = d; s_scale_idx = i; }
+            }
+        } else {
+            nv2a_vk_scale_pct = s_scale_pct[s_scale_idx];
+        }
+    }
+    picture_changed();
+#endif
+    options_log();
+}
+
+static void options_save(void)
+{
+    int i;
+    FILE *f = fopen(NFSU2_OPTIONS_FILE, "w");
+    if (!f) {
+        fprintf(stderr, "[options] cannot write " NFSU2_OPTIONS_FILE "\n");
+        return;
+    }
+    fprintf(f, "reflections=%d\nvibration=%d\n", s_refl, s_vib_idx * 10);
+    if (s_scale_saved)
+        fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
+#ifdef NFSU2_VULKAN
+    fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
+#endif
+    for (i = 0; i < N_VOLS; i++)
+        if (s_vol_have[i])
+            fprintf(f, "%s=%.2f\n", s_vol_rows[i].key, s_vol[i]);
+    fclose(f);
+}
+
+static OptRow *opt_row(uint32_t obj)
+{
+    int i;
+    uint32_t vt;
+
+    if (!obj || !(vt = MEM32(obj)))
+        return NULL;
+    for (i = 0; i < N_ROWS; i++)
+        if (s_rows[i].vtable == vt)
+            return &s_rows[i];
+    return NULL;
+}
+
+/* Face views off for this frame (on: the scheduler's choice stands). */
+static void refl_views(void)
+{
+    uint32_t n, v;
+
+    if (s_refl)
+        return;
+    for (n = 0; n < 6; n++)
+        if ((v = MEM32(ENVMAP_TABLE + n * 4)) != 0)
+            MEM8(v + 8) = 0;
+}
+
+/* Appends our rows for one screen (gameplay 0 = Video, 1 = Gameplay) to
+ * an options screen, as its constructor adds its own. */
+static void add_rows(uint32_t screen, int gameplay)
+{
+    uint32_t row;
+    int i;
+
+    for (i = 0; i < N_ROWS; i++) {
+        OptRow *o = &s_rows[i];
+        if (o->gameplay != gameplay)
+            continue;
+        if (!o->vtable) {
+            o->vtable = xbox_ContiguousAlloc(ROW_VTABLE_SIZE, 16);
+            if (!o->vtable)
+                return;
+            memcpy((void *)XBOX_PTR(o->vtable), (const void *)XBOX_PTR(ROW_VTABLE),
+                   ROW_VTABLE_SIZE);
+        }
+        PUSH32(esp, 0x54u);                 /* operator new(0x54), cdecl */
+        PUSH32(esp, 0x000CEAD4u);
+        sub_0003ED50();
+        esp += 4;
+        row = eax;
+        if (!row)
+            return;
+        PUSH32(esp, 1);                     /* row(&screen[0x100..0x120], 1) */
+        PUSH32(esp, screen + 0x120u);
+        PUSH32(esp, screen + 0x118u);
+        PUSH32(esp, screen + 0x110u);
+        PUSH32(esp, screen + 0x100u);
+        ecx = row;
+        PUSH32(esp, 0x000CEB0Cu);
+        sub_0012AF20();                     /* thiscall, pops its 5 */
+        MEM32(row) = o->vtable;
+        PUSH32(esp, 1);                     /* screen->AddOption(row, 1) */
+        PUSH32(esp, row);
+        ecx = screen;
+        PUSH32(esp, 0x000CEB23u);
+        sub_0015B2E0();                     /* thiscall, pops its 2 */
+    }
+}
+
+/* Video screen (thiscall, ecx = options screen): the original rows, then
+ * ours. The screen shows a colour-calibration panel in the lower half --
+ * FE objects ColorCal_Logo, ColorCal_Blurb ("lower the brightness of your
+ * television") and Colour_Calibration_Backing (names at 0x34F424/0x34F414/
+ * 0x34F3F8) -- over list rows 5 and up, where our rows land; they are
+ * hidden again, as the screen itself hides objects (sub_00118CE0). */
+static const uint32_t s_colorcal_names[] = { 0x0034F424u, 0x0034F414u, 0x0034F3F8u };
+
+void sub_000CE8D0(void)
+{
+    uint32_t screen = ecx;
+    int i;
+
+    sub_000CE8D0_gen();
+    for (i = 0; i < 3; i++) {
+        PUSH32(esp, s_colorcal_names[i]);   /* name hash, cdecl */
+        PUSH32(esp, 0x000CE9A5u);
+        sub_001160C0();
+        esp += 4;
+        PUSH32(esp, eax);                   /* FE object by hash, cdecl */
+        PUSH32(esp, MEM32(screen + 4u));
+        PUSH32(esp, 0x000CE9ACu);
+        sub_00144310();
+        esp += 8;
+        PUSH32(esp, eax);                   /* hide it, cdecl */
+        PUSH32(esp, 0x000CE918u);
+        sub_00118CE0();
+        esp += 4;
+    }
+    add_rows(screen, 0);
+}
+
+/* Gameplay screen (thiscall, ecx = options screen): its rows, then ours. */
+void sub_000CEA00(void)
+{
+    uint32_t screen = ecx;
+
+    sub_000CEA00_gen();
+    add_rows(screen, 1);
+}
+
+/* Row refresh (thiscall): label and value text. */
+static void opt_row_text(uint32_t row, const OptRow *o)
+{
+    PUSH32(esp, o->label);
+    PUSH32(esp, MEM32(row + 0x2Cu));
+    PUSH32(esp, 0x000B51B1u);
+    sub_00118BF0();
+    esp += 8;
+    PUSH32(esp, o->texts[*o->value]);
+    PUSH32(esp, MEM32(row + 0x30u));
+    PUSH32(esp, 0x000B51CEu);
+    sub_00118BF0();
+    esp += 8;
+}
+
+void sub_000B51A0(void)
+{
+    OptRow *o = opt_row(ecx);
+
+    if (!o) {
+        sub_000B51A0_gen();
+        return;
+    }
+    opt_row_text(ecx, o);
+    esp += 4;
+}
+
+/* Row input (thiscall, (?, message), ret 8): left/right step the value
+ * (wrapping, like the game's two-value rows), then the arrow flash
+ * (vt+0x40) and the refresh, as the original. */
+void sub_000B5140(void)
+{
+    uint32_t row = ecx, msg = MEM32(esp + 8);
+    OptRow *o = opt_row(row);
+
+    if (!o) {
+        sub_000B5140_gen();
+        return;
+    }
+    if (msg == FE_PAD_LEFT || msg == FE_PAD_RIGHT) {
+        *o->value = (*o->value + (msg == FE_PAD_RIGHT ? 1 : o->n - 1)) % o->n;
+        o->changed();
+        refl_views();
+        options_save();
+        options_log();
+    }
+    PUSH32(esp, msg);
+    ecx = row;
+    PUSH32(esp, 0x000B5171u);
+    sub_0012B3B0();                         /* thiscall, pops its 1 */
+    opt_row_text(row, o);
+    esp += 4 + 8;
+}
+
+/* Env-map update scheduler (thiscall, 2 args, ret 8). */
+void sub_0009B720(void)
+{
+    sub_0009B720_gen();
+    refl_views();
+}
+
+/* Audio manager: take the volume block (thiscall, 1 arg, ret 4). The
+ * block is filled by a static constructor after boot, and the first call
+ * comes when the profile is applied (sub_00141070): the saved volumes go
+ * in there. After that every Audio slider calls it once it has stored its
+ * value; keep what changed. */
+void sub_00076A70(void)
+{
+    uint32_t blk = MEM32(esp + 4);
+    int i, restored = 0, changed = 0;
+
+    if (blk == AUDIO_VOLUMES && !s_vol_ready) {
+        for (i = 0; i < N_VOLS; i++) {
+            if (s_vol_have[i])
+                MEMF(s_vol_rows[i].va) = s_vol[i];
+            else
+                s_vol[i] = MEMF(s_vol_rows[i].va);
+            s_vol_have[i] = 1;
+        }
+        s_vol_ready = restored = 1;
+    }
+    sub_00076A70_gen();
+    if (blk != AUDIO_VOLUMES)
+        return;
+    for (i = 0; i < N_VOLS; i++)
+        if (MEMF(s_vol_rows[i].va) != s_vol[i]) {
+            s_vol[i] = MEMF(s_vol_rows[i].va);
+            changed = 1;
+        }
+    if (changed)
+        options_save();
+    if (restored || changed) {
+        fprintf(stderr, "[options] volumes");
+        for (i = 0; i < N_VOLS; i++)
+            fprintf(stderr, " %s %d%%", s_vol_rows[i].key, (int)(s_vol[i] * 100.0f + 0.5f));
+        fprintf(stderr, "%s\n", changed ? "" : " (restored)");
+    }
 }
 
 /* ── Manual function overrides ─────────────────────────────── */

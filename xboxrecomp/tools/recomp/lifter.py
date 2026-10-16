@@ -511,6 +511,13 @@ def _lahf_value(flag_setter, flag_ops):
     return "(uint8_t)(0x02 | " + " | ".join(bits) + ")"
 
 
+# Spellings of the same condition, to one name (materialised joins).
+_JCC_CANON = {"jz": "je", "jnz": "jne", "jc": "jb", "jnae": "jb", "jnc": "jae",
+              "jnb": "jae", "jna": "jbe", "jnbe": "ja", "jnge": "jl",
+              "jnl": "jge", "jng": "jle", "jnle": "jg", "jpe": "jp",
+              "jpo": "jnp"}
+
+
 def _make_condition(jcc, flag_setter, flag_ops):
     """
     Generate a C condition expression for a jcc based on what set the flags.
@@ -532,6 +539,15 @@ def _make_condition(jcc, flag_setter, flag_ops):
     # Only ZF is answerable from it. dec does not write CF, so a jb after the
     # same join would be reading a flag one predecessor never set; returning
     # None there leaves the existing fallback in place.
+    # A join whose predecessors set the flags with different instructions
+    # (`test al, al` reached by jmp, `inc al` by fall-through): each
+    # predecessor computed this condition into a variable before it left
+    # (translator.py, materialised joins). Only the conditions it was asked
+    # for exist.
+    if flag_setter == "__materialized":
+        var = dict(flag_ops).get(_JCC_CANON.get(jcc, jcc))
+        return (var, desc) if var else None
+
     if flag_setter == "__zf_from_dest" and flag_ops:
         dest = _fmt_operand_read(flag_ops[0])
         if jcc in ("je", "jz"):
@@ -2528,8 +2544,6 @@ class Lifter:
         targets = self.jump_table_targets.get(table_va)
         if targets is None:
             targets = self._read_jump_table(table_va)
-        if not targets:
-            return []
         # Truncate at the first entry outside the function rather than
         # demanding that every entry be inside it.
         #
@@ -2546,16 +2560,58 @@ class Lifter:
         # 0x005BA617 has 8 real arms followed by code; the old rule resolved
         # none of them, the indexed jump became an unresolvable indirect call,
         # and sprintf silently produced the wrong string.
+        inside = self._leading_arms(targets)
+        # Two arms is the smallest thing worth calling a switch; one is more
+        # likely a coincidence than a jump table.
+        if len(inside) >= 2:
+            return inside
+        if table_va in self.jump_table_targets:
+            # A census entry is authoritative (see _authoritative_jump_tables);
+            # never rediscover arms it rejected.
+            return []
+        # The displacement is not always where the table starts. MSVC's CRT
+        # memcpy/memmove dispatch their lead and trail bytes with
+        #
+        #     and  eax, 3              ; 1..3, never 0 on this path
+        #     jmp  [eax*4 + LeadUpVec - 4]
+        #
+        #     sub  ecx, 4              ; -4..-1 when fewer than 4 dwords left
+        #     jmp  [ecx*4 + TrailUpVec + 16]
+        #
+        # so slot 0 is the previous instruction's bytes, or the arms all sit
+        # below the base. Both escaped as unresolvable indirect tail jumps,
+        # and an unaligned memcpy returned without copying. The emitted
+        # switch compares the loaded value against its arms rather than
+        # indexing, so only the set of arms matters, not where index 0 is.
+        skipped = self._leading_arms(self._read_jump_table(table_va + 4))
+        if len(skipped) >= 2:
+            return skipped
+        # A table counted down from its last slot (`jmp [ecx*4 + LAST]`) has
+        # that one slot at the displacement itself, already in `inside`.
+        below = inside + self._leading_arms(
+            self._read_jump_table_backward(table_va - 4))
+        if len(below) >= 2:
+            return below
+        return []
+
+    def _leading_arms(self, targets):
+        """Entries up to the first one outside the current function."""
         inside = []
         for target in targets:
             if not (self.func_start <= target < self.func_end):
                 break
             inside.append(target)
-        # Two arms is the smallest thing worth calling a switch; one is more
-        # likely a coincidence than a jump table.
-        if len(inside) >= 2:
-            return inside
-        return []
+        return inside
+
+    def _read_jump_table_backward(self, last_va, max_entries=256):
+        """Like _read_jump_table, reading downward from last_va."""
+        targets = []
+        for i in range(max_entries):
+            got = self._read_jump_table(last_va - i * 4, max_entries=1)
+            if not got:
+                break
+            targets.append(got[0])
+        return targets
 
     def _lift_jmp(self, insn, ops):
         if insn.jump_target:
@@ -3249,16 +3305,19 @@ class Lifter:
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(float)(int32_t){src}") + " /* cvtsi2ss */"]
-        if m in ("cvtss2si", "cvttss2si"):
+        if m in ("cvtss2si", "cvttss2si", "cvtsd2si", "cvttsd2si"):
+            # x86: cvt* rounds by MXCSR (nearest; titles leave it there),
+            # cvtt* truncates; NaN / out of range give 0x80000000. A C cast
+            # truncates both and is undefined out of range (AArch64
+            # saturates). recomp_types.h RECOMP_CVT_SI.
             if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
+                rnd = 0 if m.startswith("cvtt") else 1
+                return [_fmt_operand_write(ops[0], f"RECOMP_CVT_SI({_sse_read(ops[1])}, {rnd})")
+                        + f" /* {m} */"]
         if m == "cvtsi2sd":
             if nops >= 2:
                 src = _fmt_operand_read(ops[1])
                 return [_sse_write(ops[0], f"(double)(int32_t){src}") + " /* cvtsi2sd */"]
-        if m in ("cvtsd2si", "cvttsd2si"):
-            if nops >= 2:
-                return [_fmt_operand_write(ops[0], f"(int32_t){_sse_read(ops[1])}") + f" /* {m} */"]
         if m == "cvtss2sd":
             if nops >= 2:
                 return [_sse_write(ops[0], f"(double){_sse_read(ops[1])}") + " /* cvtss2sd */"]

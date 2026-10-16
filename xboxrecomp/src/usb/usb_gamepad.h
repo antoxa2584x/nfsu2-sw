@@ -47,6 +47,11 @@ int usb_gamepad_report(int dev, uint8_t *out, int max);
  * pad; anything else is ignored. */
 void usb_gamepad_output(int dev, const uint8_t *data, int len);
 
+/* Rumble strength in percent (0..100, default 100) applied to every output
+ * report; set by the game port's options. Takes effect with the title's
+ * next report (it resends them while a motor runs). */
+extern volatile int usb_gamepad_rumble_pct;
+
 /* The address the host assigned with SET_ADDRESS, 0 until it does. */
 uint8_t usb_gamepad_address(int dev);
 

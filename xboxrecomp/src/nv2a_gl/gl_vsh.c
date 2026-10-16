@@ -246,6 +246,13 @@ int nv2a_gl_vsh_program(const uint32_t (*prog)[4], uint32_t slots,
     "vec2 nv2a_snap(vec2 sw, float w) {\n" \
     "    return w > 0.0 ? (trunc(sw / w * 16.0) / 16.0 - u_surf.w) * w : sw;\n" \
     "}\n"
+/* Vulkan: the scale may differ per axis (RECOMP_GL_SCALE_X), so y has its
+ * own offset, u_snap_y. */
+#define NV2A_SNAP_VK_GLSL \
+    "vec2 nv2a_snap(vec2 sw, float w) {\n" \
+    "    vec2 off = vec2(u_surf.w, u_snap_y);\n" \
+    "    return w > 0.0 ? (trunc(sw / w * 16.0) / 16.0 - off) * w : sw;\n" \
+    "}\n"
 
 /* Everything around the program body: inputs, the register file, the ILU
  * helpers (same constants as the interpreter), and the three position
@@ -277,6 +284,7 @@ static const char s_vk_prelude[] =
     "    vec4 u_vpoff;\n"
     "    vec2 u_aa;\n"
     "    int u_xform;\n"
+    "    float u_snap_y;\n"
     "};\n"
     /* Transform constants, 192 per instance: an instanced draw (nv2a_vk.c)
      * repeats one mesh with each instance's own set. NV2A_VK_INSTANCES. */
@@ -308,7 +316,7 @@ static const char s_vk_prelude[] =
      * vertex is clipped by x/y anyway and its true z is about w: clamping it
      * to 0 skewed the interpolated depth of triangles crossing the eye plane
      * (walls in hood view turned transparent, objects showed through them). */
-    NV2A_SNAP_GLSL
+    NV2A_SNAP_VK_GLSL
     "vec4 nv2a_clip(vec3 sw, float w) {\n"
     "    float z = sw.z * u_surf.z;\n"
     "    sw.xy = nv2a_snap(sw.xy, w);\n"

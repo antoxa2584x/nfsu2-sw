@@ -481,17 +481,23 @@ int usb_gamepad_report(int dev, uint8_t *out, int max)
 
 /* ---- the output report ------------------------------------------------- */
 
+volatile int usb_gamepad_rumble_pct = 100;
+
 void usb_gamepad_output(int dev, const uint8_t *data, int len)
 {
     static int trace = -1;
     static uint16_t last_l[USB_GAMEPADS] = { 0xFFFF, 0xFFFF };
     static uint16_t last_r[USB_GAMEPADS] = { 0xFFFF, 0xFFFF };
     XBOX_VIBRATION vib;
+    int pct;
 
     if (len < 6 || data[0] != 0x00 || data[1] < 6)
         return;
-    vib.wLeftMotorSpeed  = (uint16_t)(data[2] | (data[3] << 8));
-    vib.wRightMotorSpeed = (uint16_t)(data[4] | (data[5] << 8));
+    pct = usb_gamepad_rumble_pct;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    vib.wLeftMotorSpeed  = (uint16_t)((data[2] | (data[3] << 8)) * pct / 100);
+    vib.wRightMotorSpeed = (uint16_t)((data[4] | (data[5] << 8)) * pct / 100);
     /* The title resends the same speeds every frame or so; the host call
      * can be an IPC (Switch hid), so only changes go out. */
     if (vib.wLeftMotorSpeed == last_l[dev] && vib.wRightMotorSpeed == last_r[dev])
