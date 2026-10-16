@@ -78,3 +78,27 @@ TDATA/
 UDATA/
 .venv/
 vkpipes_sv.bin
+
+# Local validation scratch files
+/work/
+
+# Private credentials, signing material and local exports
+.env
+.env.*
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.ipa
+*.xcarchive/
+DerivedData/
+outputs/
+*.xcuserstate
+xcuserdata/
+# Other disc/container formats
+*.cso
+*.chd
+*.xex
+*.cue
+*.bin

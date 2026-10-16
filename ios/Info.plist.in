@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>NFSU2</string>
+	<string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
 	<key>CFBundleExecutable</key>
 	<string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
 	<key>CFBundleIdentifier</key>
@@ -54,6 +54,13 @@
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>LSSupportsGameMode</key>
+	<true/>
+	<!-- Compatibility with iOS 18.0–18.5. -->
+	<key>GCSupportsGameMode</key>
+	<true/>
 	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>UIStatusBarHidden</key>

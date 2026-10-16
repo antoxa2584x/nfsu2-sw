@@ -117,9 +117,9 @@ After a change to a CMake file, run `cmake build-ios` again before `xcodebuild`.
 
 Either:
 
-- **In the app:** copy the game folder to the phone (Files app, AirDrop, or Finder → your iPhone →
-  Files → NFSU2), start the app, and pick the folder when it asks. It checks `default.xbe` and
-  copies the game into place; or
+- **In the app:** copy your Xbox ISO or game folder to the phone (Files app, AirDrop, or Finder → your iPhone →
+  Files → NFSU2), start the app, and pick the folder when it asks. It checks `default.xbe` before copying, streams extraction for an ISO, and
+  installs the game while preserving existing saves; or
 - **From the Mac:**
   ```sh
   xcrun devicectl device copy to --device <UDID> --domain-type appDataContainer \
@@ -129,7 +129,10 @@ Either:
 ## Playing
 
 - **Controls:** a paired controller (DualSense, Xbox, MFi) works and hides the touch controls; without
-  one, an on-screen pad appears (stick, A/B/X/Y, gas and brake, Start/Back).
+  one, the Menu overlay appears. The verified PAL profile automatically chooses Drive during gameplay and Menu during pause/options or frontend/loading. The top-centre toggle remains a manual fallback; `NFSU2_AUTO_CONTROLS=0` disables detection. NTSC builds retain the manual toggle.
+- **Customize touch controls:** tap **Edit** at the top of the game screen, select **Menu** or **Driving**, then select a button. Change its horizontal/vertical position, size, visibility or action. Opacity applies to that entire layout. A live preview updates while you edit. Tap the navigation Back button to return to the list, then **Save**; **Cancel** discards changes. **Reset menu/driving layout** restores just that profile. Preferences persist in the app. The game, audio and renderer pause while editing, including when switching away from the app.
+- **MP3 music:** Edit → **My Music · Import MP3s** → **Add MP3s from Files** accepts multiple MP3 files. Turn on **My Music** to play the imported playlist, use **Next Track** to skip and adjust its independent volume. Files persist in `Documents/Music`; music settings apply immediately, independently of layout Save/Cancel. Playback pauses in the background and on interruptions/headphone removal. This mixes with game audio; turn down the original soundtrack in the game's audio options to retain engine sounds with only your own music.
+- **Controller handoff:** connecting a physical SDL-supported controller releases and hides touch input; disconnecting restores it. Edit stays visible. Custom touch remapping affects the mobile pad; controller mappings follow the game/SDL controller mapping. `NFSU2_TOUCH=2` keeps the overlay visible and reattaches it behind physical controllers so they retain port 0.
 - **Settings:** `Documents/nfsu2x_env.txt` on the phone (Files app → NFSU2), one `KEY=VALUE` per line,
   the same names as the Linux/Switch builds. Useful ones:
 
@@ -137,12 +140,20 @@ Either:
   |---|---|
   | `NFSU2_RENDERER=vulkan` | MoltenVK instead of the native Metal renderer |
   | `NFSU2_TOUCH=0` / `=2` | no touch controls / always show them |
-  | `RECOMP_GL_SCALE=1.5` | render at 1.5x (sharper, more GPU) |
-  | `RECOMP_FPS_LOG=1` | fps, CPU, heat and sound health every 10 s in `nfsu2x_log.txt` |
+  | `NFSU2_FPS_LIMIT=60` | optional presentation ceiling (default 0 = uncapped; accepts 0–1000, invalid values fall back to uncapped) |
+  | `NFSU2_SCREEN=fit` / `=fill` | preserve aspect ratio / fill the screen (iOS default: fill, with stretching on wider screens) |
+  | `NFSU2_TOUCH_LAYOUT=drive` | start with the driving overlay rather than Menu |
+  | `NFSU2_FULLSCREEN=0` | start windowed on macOS (F11 toggles fullscreen) |
+  | `RECOMP_GL_SCALE=4` | iOS default: 4× width/height, 16× pixels; lower values reduce GPU cost |
+  | `RECOMP_FPS_LOG=1` | fps, GPU command-buffer execution time, CPU, heat and sound health every 10 s in `nfsu2x_log.txt` |
   | `RECOMP_AUDIO_VOLUME=50` | master volume 0–100 |
 
 - The log of the last run is `Documents/nfsu2x_log.txt`; saves live in `Documents/game/UDATA`.
 - Leaving the app pauses the game, its sound and all GPU work.
+
+The ISO reader supports bare Xbox game partitions and common full-disc layouts and validates paths and extents before extraction. Each app accepts the executable matching its translated region profile: NTSC-U by default, or the European En/Fr/De/It/Nl/Sv PAL build below. Other executable revisions need their own verified translation and address mapping. The European disc extracts to about 4.45 GB; keep additional space available for the import.
+
+For Apple builds, new CMake build directories default to `NFSU2_GEN_OPT=-O2`. Existing build directories retain their cached setting; pass `-DNFSU2_GEN_OPT=-O2` explicitly. `-DNFSU2_LTO=ON` now uses ThinLTO on Clang/AppleClang. This is opt-in because the full generated game is large; peak link memory and gameplay gains have not been measured.
 
 ## No Mac? Lift the code on Windows
 
@@ -208,8 +219,38 @@ continue from step 4. To check that the copy arrived intact, compare
 ## Known issues
 
 - Career free-roam radio speech can drop out on the iPhone (fine on macOS); see
-  `docs/IOS_PORT_LOG.md`.
+  `docs/REGIONS.md`.
 
 ## Licences
 
 See `docs/APPLE_NOTICES.md` for the libraries the Apple builds include and their licences.
+
+
+## European PAL build
+
+Extract your own `default.xbe` from the Europe En/Fr/De/It/Nl/Sv disc. The supported
+SHA-1 is `144deb954e0e9208e0b7e08e09b4e5e67b2f3356`. The preparation script verifies
+this exact executable before adapting graphics, audio, memory-copy, movie and
+matrix hooks. Keep all translation output private and outside the source repo.
+
+```sh
+PYTHON=/path/to/venv/bin/python \
+NFSU2_XBE=/path/to/pal/default.xbe \
+NFSU2_GEN_DIR=/path/to/private-pal/gen \
+NFSU2_PAL_WORK=/path/to/private-pal tools/regen_pal.sh
+```
+
+Add these options to the macOS/iOS CMake commands above:
+
+```sh
+-DNFSU2_REGION=PAL \
+-DNFSU2_GEN_DIR=/path/to/private-pal/gen \
+-DNFSU2_MANUAL_SOURCE=/path/to/private-pal/recomp_manual.c
+```
+
+Use the VP6-only dynamic FFmpeg frameworks for native movie playback. The PAL
+profile retains translated routines for unverified NTSC native math overrides;
+frame-lag and simulation-cap address patches remain disabled in this profile.
+The app imports PAL ISO/folder data using the PAL hash. The NTSC profile keeps its
+own hash and overrides. One app does not mix translated executables from different
+regions. See `REGIONS.md` for supported executable profiles and compatibility limits.

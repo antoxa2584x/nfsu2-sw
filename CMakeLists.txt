@@ -47,9 +47,21 @@ add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 
 file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "${NFSU2_GEN_DIR}/*.c")
 
+set(NFSU2_MANUAL_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp_manual.c" CACHE FILEPATH
+    "Manual overrides matching the translated executable")
+set(NFSU2_REGION "NTSC-U" CACHE STRING "Translated executable profile: NTSC-U or PAL")
+if(NFSU2_REGION STREQUAL "PAL")
+    if(NFSU2_MANUAL_SOURCE STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp_manual.c")
+        message(FATAL_ERROR "PAL requires tools/regen_pal.sh and its NFSU2_MANUAL_SOURCE output")
+    endif()
+    add_compile_definitions(NFSU2_REGION_PAL=1)
+elseif(NOT NFSU2_REGION STREQUAL "NTSC-U")
+    message(FATAL_ERROR "Unsupported executable profile ${NFSU2_REGION}")
+endif()
+
 set(GAME_SOURCES
     src/main.c
-    src/recomp_manual.c
+    ${NFSU2_MANUAL_SOURCE}
     src/switch_nx.c
     src/switch_saltynx.c
     src/text_patch.c
@@ -68,8 +80,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
 # AppKit owns the main thread: window and events there, the title on its own
 # thread (src/apple/apple_main.c).
 if(APPLE)
+    set_property(SOURCE ${NFSU2_MANUAL_SOURCE} APPEND PROPERTY COMPILE_OPTIONS "-ffp-contract=off")
     enable_language(OBJC)
-    target_sources(${PROJECT_NAME} PRIVATE src/apple/apple_main.c src/apple/apple_perf.m
+    target_sources(${PROJECT_NAME} PRIVATE src/apple/apple_main.c src/apple/apple_game_state.c src/apple/apple_perf.m
                                            src/apple/apple_keyboard.c)
     set_source_files_properties(src/apple/apple_perf.m PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
                                 INCLUDE_DIRECTORIES "${XBOXRECOMP_DIR}/src/apu")
@@ -79,19 +92,27 @@ endif()
 # iOS app: SDL's UIKit glue runs apple_main.c's main as SDL_main; Vulkan via
 # MoltenVK; dependencies from tools/build_ios_deps.sh on CMAKE_PREFIX_PATH.
 if(IOS)
+    set(_nfsu2_bundle_name "NFSU2")
     set(NFSU2_IOS_BUNDLE_ID "com.example.nfsu2x" CACHE STRING "iOS bundle identifier")
     find_package(SDL2 REQUIRED)
     enable_language(OBJC)
     target_sources(${PROJECT_NAME} PRIVATE src/ios/ios_host.c src/ios/ios_scene.m src/ios/ios_touch.m
-                                           src/ios/ios_import.m)
+                                           src/ios/ios_import.m src/ios/ios_xiso.c src/ios/ios_touch_layout.m
+                                           src/ios/ios_touch_settings.m src/ios/ios_music.m)
     set_source_files_properties(src/ios/ios_scene.m src/ios/ios_touch.m src/ios/ios_import.m
+                                src/ios/ios_touch_layout.m src/ios/ios_touch_settings.m src/ios/ios_music.m
                                 PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main "-framework UniformTypeIdentifiers")
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2main "-framework UniformTypeIdentifiers" "-framework AVFoundation")
+    target_sources(${PROJECT_NAME} PRIVATE ios/Assets.xcassets)
+    set_source_files_properties(ios/Assets.xcassets PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(${PROJECT_NAME} PROPERTIES
         MACOSX_BUNDLE TRUE
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${NFSU2_IOS_BUNDLE_ID}"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
         MACOSX_BUNDLE_GUI_IDENTIFIER "${NFSU2_IOS_BUNDLE_ID}"
-        MACOSX_BUNDLE_BUNDLE_NAME "NFSU2"
+        MACOSX_BUNDLE_BUNDLE_NAME "${_nfsu2_bundle_name}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "0.1"
         MACOSX_BUNDLE_BUNDLE_VERSION "1")
 endif()
@@ -138,8 +159,9 @@ if(WIN32)
 else()
     # The generated chunks are huge straight-line functions; -O1 keeps GCC's
     # memory and time per chunk sane while still allocating registers. The
-    # Switch's CPU is the bottleneck there, so it gets -O2.
-    if(NINTENDO_SWITCH)
+    # Switch and Apple arm64 use -O2; override NFSU2_GEN_OPT to trade build
+    # time and memory for optimisation on a particular machine.
+    if(NINTENDO_SWITCH OR APPLE)
         set(NFSU2_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
     else()
         set(NFSU2_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")
@@ -151,9 +173,14 @@ else()
     option(NFSU2_LTO "Link-time optimisation of the lifted code" OFF)
     set(NFSU2_LTO_JOBS "4" CACHE STRING "Parallel LTO link jobs")
     set(NFSU2_GEN_FLAGS "${NFSU2_GEN_OPT};-w;-fno-strict-aliasing;-fwrapv")
-    if(NFSU2_LTO)
+    if(NFSU2_LTO AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+        list(APPEND NFSU2_GEN_FLAGS "-flto=thin")
+        set_property(SOURCE ${NFSU2_MANUAL_SOURCE} APPEND PROPERTY
+            COMPILE_OPTIONS "-flto=thin;-fno-strict-aliasing;-fwrapv")
+        target_link_options(${PROJECT_NAME} PRIVATE "-flto=thin" ${NFSU2_GEN_OPT})
+    elseif(NFSU2_LTO)
         list(APPEND NFSU2_GEN_FLAGS "-flto=auto")
-        set_property(SOURCE src/recomp_manual.c APPEND PROPERTY
+        set_property(SOURCE ${NFSU2_MANUAL_SOURCE} APPEND PROPERTY
             COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
         target_link_options(${PROJECT_NAME} PRIVATE
             "-flto=${NFSU2_LTO_JOBS}" "-flto-partition=balanced" ${NFSU2_GEN_OPT})

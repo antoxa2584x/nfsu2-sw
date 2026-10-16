@@ -35,6 +35,7 @@ void ios_host_setup(void);              /* src/ios/ios_host.c */
 int ios_attach_window_to_scene(SDL_Window *window);   /* src/ios/ios_scene.m */
 void ios_touch_attach(SDL_Window *window);            /* src/ios/ios_touch.m */
 void ios_touch_controllers_changed(void);
+void ios_touch_update_auto(void);
 int ios_import_game(const char *game_dir);            /* src/ios/ios_import.m */
 void ios_verify_game(const char *game_dir);
 #endif
@@ -47,7 +48,9 @@ void apple_keyboard_event(const SDL_Event *e);
 void apple_perf_start(void);            /* apple_perf.m: [perf] lines */
 
 static SDL_Window   *s_win;
+#if !defined(NFSU2_VULKAN)
 static SDL_GLContext s_ctx;
+#endif
 static int           s_rc = 1;
 static Uint32        s_done_event;
 static int           s_metal;            /* NFSU2_RENDERER=metal */
@@ -159,6 +162,7 @@ void *nv2a_mtl_host_layer(void)
 static pthread_mutex_t s_fg_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_fg_cond = PTHREAD_COND_INITIALIZER;
 static int             s_background;
+static int             s_controls_editor;
 
 void xbox_gil_enter(void);              /* kernel_bridge.c: the guest lock */
 void xbox_gil_leave(void);
@@ -169,14 +173,14 @@ static void *pause_thread(void *arg)
     (void)arg;
     pthread_mutex_lock(&s_fg_lock);
     for (;;) {
-        while (!s_background)
+        while (!(s_background || s_controls_editor))
             pthread_cond_wait(&s_fg_cond, &s_fg_lock);
         pthread_mutex_unlock(&s_fg_lock);
         xbox_gil_enter();               /* each guest thread stops at its next yield */
         pthread_mutex_lock(&s_fg_lock);
-        if (s_background)
+        if (s_background || s_controls_editor)
             fprintf(stderr, "[ios] guest paused\n");
-        while (s_background)
+        while (s_background || s_controls_editor)
             pthread_cond_wait(&s_fg_cond, &s_fg_lock);
         pthread_mutex_unlock(&s_fg_lock);
         xbox_gil_leave();
@@ -185,15 +189,27 @@ static void *pause_thread(void *arg)
     return NULL;
 }
 
+/* Main-thread UI request; pause ownership composes with backgrounding. */
+void ios_controls_editor_pause(int on)
+{
+    pthread_mutex_lock(&s_fg_lock);
+    s_controls_editor = on != 0;
+    int paused = s_background || s_controls_editor;
+    pthread_cond_broadcast(&s_fg_cond);
+    pthread_mutex_unlock(&s_fg_lock);
+    xa2_pause(paused);
+}
+
 static int app_events(void *userdata, SDL_Event *e)
 {
     (void)userdata;
     if (e->type == SDL_APP_WILLENTERBACKGROUND || e->type == SDL_APP_DIDENTERFOREGROUND) {
         pthread_mutex_lock(&s_fg_lock);
         s_background = e->type == SDL_APP_WILLENTERBACKGROUND;
+        int paused = s_background || s_controls_editor;
         pthread_cond_broadcast(&s_fg_cond);
         pthread_mutex_unlock(&s_fg_lock);
-        xa2_pause(e->type == SDL_APP_WILLENTERBACKGROUND);
+        xa2_pause(paused);
         fprintf(stderr, "[ios] %s\n", e->type == SDL_APP_WILLENTERBACKGROUND
                 ? "background: GPU work, guest and audio paused" : "foreground");
     }
@@ -203,7 +219,7 @@ static int app_events(void *userdata, SDL_Event *e)
 void nv2a_vk_host_gate(void)
 {
     pthread_mutex_lock(&s_fg_lock);
-    while (s_background)
+    while (s_background || s_controls_editor)
         pthread_cond_wait(&s_fg_cond, &s_fg_lock);
     pthread_mutex_unlock(&s_fg_lock);
 }
@@ -244,6 +260,7 @@ int main(int argc, char **argv)
 #if TARGET_OS_IPHONE
     ios_host_setup();                   /* paths, settings file, log */
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, "2");
     SDL_SetHint(SDL_HINT_IDLE_TIMER_DISABLED, "1");   /* no auto-lock during movies */
     SDL_SetHint(SDL_HINT_ACCELEROMETER_AS_JOYSTICK, "0");
 #endif
@@ -310,6 +327,13 @@ int main(int argc, char **argv)
         }
     }
 #endif
+#if !TARGET_OS_IPHONE
+    {
+        const char *e = getenv("NFSU2_FULLSCREEN");
+        if (s_win && !(e && !strcmp(e, "0")))
+            SDL_SetWindowFullscreen(s_win, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    }
+#endif
     s_done_event = SDL_RegisterEvents(1);
 
     pthread_attr_init(&attr);
@@ -331,8 +355,13 @@ int main(int argc, char **argv)
 #endif
     for (;;) {
         SDL_Event e;
-        if (!SDL_WaitEvent(&e))
-            continue;
+#if TARGET_OS_IPHONE
+        int got_event = SDL_WaitEventTimeout(&e, 50);
+        ios_touch_update_auto();
+        if (!got_event) continue;
+#else
+        if (!SDL_WaitEvent(&e)) continue;
+#endif
         if (e.type == SDL_QUIT) {
             fprintf(stderr, "[apple] window closed\n");
             fflush(stdout);
@@ -345,6 +374,9 @@ int main(int argc, char **argv)
         if (e.type == SDL_JOYDEVICEADDED || e.type == SDL_JOYDEVICEREMOVED)
             ios_touch_controllers_changed();
 #else
+        if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11 && !e.key.repeat && s_win)
+            SDL_SetWindowFullscreen(s_win, (SDL_GetWindowFlags(s_win) & SDL_WINDOW_FULLSCREEN_DESKTOP)
+                                           ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         apple_keyboard_event(&e);
         if (e.type == SDL_JOYDEVICEADDED || e.type == SDL_JOYDEVICEREMOVED)
             apple_keyboard_controllers_changed();

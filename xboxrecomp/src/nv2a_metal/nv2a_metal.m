@@ -37,6 +37,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <TargetConditionals.h>
+#include "../platform/apple_present.h"
 
 #include "nv2a_metal.h"
 #include "nv2a_metal_msl.h"
@@ -47,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -114,6 +116,11 @@ static id<MTLCommandBuffer> s_cb;
 static uint32_t s_cb_gen;      /* bumped at every new command buffer */
 static id<MTLRenderCommandEncoder> s_enc;
 static id<MTLBlitCommandEncoder>   s_blit;
+/* Completion handlers run off the executor thread. Publish coherent timing
+ * windows only when FPS diagnostics are requested; never wait for the GPU. */
+static pthread_mutex_t s_gpu_stats_lock = PTHREAD_MUTEX_INITIALIZER;
+static double s_gpu_ms, s_gpu_max_ms;
+static uint64_t s_gpu_samples;
 
 static void cb_new(void)
 {
@@ -123,11 +130,26 @@ static void cb_new(void)
 
 static void watch_errors(id<MTLCommandBuffer> cb)
 {
+    static int timing = -1;
+    if (timing < 0) {
+        const char *e = getenv("RECOMP_FPS_LOG");
+        timing = e && *e == '1';
+    }
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b) {
         static int reported;
         if (b.status == MTLCommandBufferStatusError && reported++ < 10)
             fprintf(stderr, "  [MTL] command buffer failed: %s\n",
                     b.error.localizedDescription.UTF8String);
+        if (timing && b.status == MTLCommandBufferStatusCompleted) {
+            double ms = (b.GPUEndTime - b.GPUStartTime) * 1000.0;
+            if (b.GPUStartTime > 0 && ms > 0) {
+                pthread_mutex_lock(&s_gpu_stats_lock);
+                s_gpu_ms += ms;
+                if (ms > s_gpu_max_ms) s_gpu_max_ms = ms;
+                s_gpu_samples++;
+                pthread_mutex_unlock(&s_gpu_stats_lock);
+            }
+        }
     }];
 }
 
@@ -177,6 +199,17 @@ static MtDepth *s_rt_depth;
 static MTLScissorRect s_sc_cur;
 static id<MTLRenderPipelineState> s_cur_pipe;
 static int s_dyn_valid;
+static int s_vs_valid, s_fs_valid, s_consts_valid;
+static size_t s_consts_bound_at;
+static Nv2aMslVs s_vs_cur;
+static Nv2aMslFs s_fs_cur;
+static id<MTLTexture> s_tex_cur[4];
+static id<MTLSamplerState> s_smp_cur[4];
+static void bindings_reset(void)
+{
+    s_vs_valid = s_fs_valid = s_consts_valid = 0;
+    for (int i = 0; i < 4; i++) { s_tex_cur[i] = nil; s_smp_cur[i] = nil; }
+}
 
 static void end_pass(void)
 {
@@ -234,24 +267,29 @@ static void set_surface_scissor(const uint32_t *r, const MtSurf *s)
     }
 }
 
-static void begin_pass(MtSurf *s, MtDepth *d)
+static void begin_pass_clear(MtSurf *s, MtDepth *d, uint32_t flags,
+                             const float *color, double depth, uint32_t stencil)
 {
     MTLRenderPassDescriptor *rp;
 
-    if (s_enc && s_rt == s && s_rt_depth == d)
+    if (!flags && s_enc && s_rt == s && s_rt_depth == d)
         return;
     end_pass();
     end_blit();
     rp = [MTLRenderPassDescriptor renderPassDescriptor];
     rp.colorAttachments[0].texture = s->tex;
-    rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    rp.colorAttachments[0].loadAction = (flags & 0xF0) ? MTLLoadActionClear : MTLLoadActionLoad;
+    if (flags & 0xF0)
+        rp.colorAttachments[0].clearColor = MTLClearColorMake(color[0], color[1], color[2], color[3]);
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     if (d) {
         rp.depthAttachment.texture = d->tex;
-        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+        rp.depthAttachment.loadAction = (flags & 1) ? MTLLoadActionClear : MTLLoadActionLoad;
+        rp.depthAttachment.clearDepth = depth;
         rp.depthAttachment.storeAction = MTLStoreActionStore;
         rp.stencilAttachment.texture = d->tex;
-        rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+        rp.stencilAttachment.loadAction = (flags & 2) ? MTLLoadActionClear : MTLLoadActionLoad;
+        rp.stencilAttachment.clearStencil = stencil;
         rp.stencilAttachment.storeAction = MTLStoreActionStore;
     }
     s_enc = [s_cb renderCommandEncoderWithDescriptor:rp];
@@ -259,9 +297,15 @@ static void begin_pass(MtSurf *s, MtDepth *d)
     s_rt_depth = d;
     s_cur_pipe = nil;
     s_dyn_valid = 0;
+    bindings_reset();
     /* The NV2A clamps depth rather than clipping at the near/far planes. */
     [s_enc setDepthClipMode:MTLDepthClipModeClamp];
     set_viewport(s->pw, s->ph);
+}
+
+static void begin_pass(MtSurf *s, MtDepth *d)
+{
+    begin_pass_clear(s, d, 0, NULL, 1.0, 0);
 }
 
 /* A texture cleared by an empty pass (new surfaces and depth buffers). */
@@ -724,6 +768,7 @@ static id<MTLTexture> tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t 
         t->used = t->checked = s_frame;
         return t->tex;
     }
+    uint64_t upload_start = hz_now();
     if (s_tex_changes < 0) {
         const char *e = getenv("RECOMP_TEX_CHANGES");
         s_tex_changes = e && atoi(e) > 0;
@@ -770,6 +815,7 @@ static id<MTLTexture> tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t 
         tex_fill(t, va + f * face, f);
     size = is_bc(fmt) ? tex_bytes(color, w, h, 0) : w * h * 4;
     tex_account(t, size * layers);
+    s_hz_tex_ns += hz_now() - upload_start;
     return t->tex;
 }
 
@@ -968,11 +1014,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], __strong id<
             if (any) {
                 *tex_out = cube_from_surfaces(va, w, h, face, faces);
             } else {
-                uint32_t texs = s_hz_texs;
-                uint64_t t0 = hz_now();
                 *tex_out = tex_get(va, color, w, h, 0, face);
-                if (s_hz_texs != texs)
-                    s_hz_tex_ns += hz_now() - t0;
             }
         }
     } else if (rt) {
@@ -980,11 +1022,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], __strong id<
         *sampled = rt;
         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
     } else {
-        uint32_t texs = s_hz_texs;
-        uint64_t t0 = hz_now();
         *tex_out = tex_get(va, color, w, h, pitch, 0);
-        if (s_hz_texs != texs)
-            s_hz_tex_ns += hz_now() - t0;
     }
     addr = regs[base + 2];
     filter = regs[base + 5];
@@ -1198,6 +1236,7 @@ static MtProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
             return c;
         }
     }
+    uint64_t compile_start = hz_now();
     for (i = 0; i < MTL_MAX_PROG; i++) {
         MtProg *c = &s_prog[i];
         if (!c->vs) { if (!victim || victim->vs) victim = c; }
@@ -1244,6 +1283,8 @@ static MtProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     s_prog_head[bucket] = (int)(p - s_prog) + 1;
     last = p;
     prog_rec_append(b, pk);
+    s_hz_progs++;
+    s_hz_prog_ns += hz_now() - compile_start;
     return p;
 }
 
@@ -2218,6 +2259,11 @@ static int upload_vertices(const Nv2aRawBatch *b)
  * anything else issues the held draw with the instance count first. */
 #define MTL_INST_MAX   16
 #define MTL_CONST_SIZE (192 * 16)
+/* Ring contents remain immutable until a new command buffer starts. A
+ * nonzero executor generation identifies all 192 constants, even when the
+ * source pointer is reused. Instancing still allocates contiguous sets. */
+static uint32_t s_consts_upload_cb, s_consts_upload_gen;
+static size_t s_consts_upload_at;
 
 extern uint8_t *nv2a_pb_reg_dirty(void);
 static uint32_t s_regs_seen[0x2000 / 4];
@@ -2436,15 +2482,7 @@ static void mtl_draw_raw_inner(const Nv2aRawBatch *b)
         return;
     s_drew_any = 1;
     psh_key(r, &pk);
-    {
-        uint32_t made = s_prog_made;
-        uint64_t t0 = hz_now();
-        p = prog_get(b, &pk);
-        if (s_prog_made != made) {
-            s_hz_progs += s_prog_made - made;
-            s_hz_prog_ns += hz_now() - t0;
-        }
-    }
+    p = prog_get(b, &pk);
     if (!p)
         return;
     s_hz_draws++;
@@ -2452,9 +2490,17 @@ static void mtl_draw_raw_inner(const Nv2aRawBatch *b)
     /* Textures first: uploads and copies end the pass. */
     for (i = 0; i < 4; i++)
         bind_stage(r, (int)i, tscale[i], &tex[i], &smp[i], &sampled[i]);
-    for (i = 0; i < 4; i++)
-        if (sampled[i] == s)
-            tex[i] = feedback_copy(s);
+    {
+        /* All stages in this draw read the same pre-draw contents. A 4×
+         * surface is large: copy it once even if several stages sample it.
+         * Keep this local to the draw so later writes always get a new copy. */
+        id<MTLTexture> feedback = nil;
+        for (i = 0; i < 4; i++)
+            if (sampled[i] == s) {
+                if (!feedback) feedback = feedback_copy(s);
+                tex[i] = feedback;
+            }
+    }
 
     memset(&key, 0, sizeof key);
     key.prog = (int)(p - s_prog);
@@ -2518,7 +2564,11 @@ static void mtl_draw_raw_inner(const Nv2aRawBatch *b)
         vb.aa[0] = b->aa_sx > 0 ? b->aa_sx : 1.0f;
         vb.aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
         vb.xform = b->xform == 1 ? 1 : 0;
-        [s_enc setVertexBytes:&vb length:sizeof vb atIndex:NV2A_MSL_VS_BLOCK];
+        if (!s_vs_valid || memcmp(&vb, &s_vs_cur, sizeof vb)) {
+            [s_enc setVertexBytes:&vb length:sizeof vb atIndex:NV2A_MSL_VS_BLOCK];
+            s_vs_cur = vb;
+            s_vs_valid = 1;
+        }
 
         memset(&fb, 0, sizeof fb);
         for (i = 0; i < 4; i++) {
@@ -2538,11 +2588,21 @@ static void mtl_draw_raw_inner(const Nv2aRawBatch *b)
         }
         fb.afunc = r[0x300 / 4] ? (int32_t)r[0x33C / 4] : 0x207;
         fb.aref = (float)(r[0x340 / 4] & 0xFF);
-        [s_enc setFragmentBytes:&fb length:sizeof fb atIndex:NV2A_MSL_FS_BLOCK];
+        if (!s_fs_valid || memcmp(&fb, &s_fs_cur, sizeof fb)) {
+            [s_enc setFragmentBytes:&fb length:sizeof fb atIndex:NV2A_MSL_FS_BLOCK];
+            s_fs_cur = fb;
+            s_fs_valid = 1;
+        }
     }
     for (i = 0; i < 4; i++) {
-        [s_enc setFragmentTexture:tex[i] atIndex:i];
-        [s_enc setFragmentSamplerState:smp[i] atIndex:i];
+        if (tex[i] != s_tex_cur[i]) {
+            [s_enc setFragmentTexture:tex[i] atIndex:i];
+            s_tex_cur[i] = tex[i];
+        }
+        if (smp[i] != s_smp_cur[i]) {
+            [s_enc setFragmentSamplerState:smp[i] atIndex:i];
+            s_smp_cur[i] = smp[i];
+        }
     }
     if (!upload_vertices(b))
         return;
@@ -2560,16 +2620,30 @@ static void mtl_draw_raw_inner(const Nv2aRawBatch *b)
         memcpy(map, idx, (size_t)n * 4);
         itype = MTLIndexTypeUInt32;
     }
-    /* Constants last: repeats append theirs right behind (pend_append). */
-    cat = ring_alloc(MTL_CONST_SIZE, CONST_ALIGN, &map);
-    if (!map) return;
-    memcpy(map, b->vp_consts, MTL_CONST_SIZE);
+    /* Constants last: instanced repeats append right behind (pend_append).
+     * Other draws may reuse an immutable upload in this command buffer. */
+    int instanced = pend_eligible(b);
+    if (!instanced && b->vp_const_gen && s_consts_upload_cb == s_cb_gen
+        && s_consts_upload_gen == b->vp_const_gen) {
+        cat = s_consts_upload_at;
+    } else {
+        cat = ring_alloc(MTL_CONST_SIZE, CONST_ALIGN, &map);
+        if (!map) return;
+        memcpy(map, b->vp_consts, MTL_CONST_SIZE);
+        s_consts_upload_cb = s_cb_gen;
+        s_consts_upload_gen = b->vp_const_gen;
+        s_consts_upload_at = cat;
+    }
     inst_room = (uint32_t)((RING_BYTES - cat) / MTL_CONST_SIZE);
     if (inst_room > MTL_INST_MAX) inst_room = MTL_INST_MAX;
-    [s_enc setVertexBuffer:s_f->ring offset:cat atIndex:NV2A_MSL_VS_CONSTS];
+    if (!s_consts_valid || s_consts_bound_at != cat) {
+        [s_enc setVertexBuffer:s_f->ring offset:cat atIndex:NV2A_MSL_VS_CONSTS];
+        s_consts_bound_at = cat;
+        s_consts_valid = 1;
+    }
 
     VT("  drawIndexedPrimitives %u\n", n);
-    if (pend_eligible(b) && inst_room > 1)
+    if (instanced && inst_room > 1)
         pend_hold(b, type, n, itype, iat, cat, inst_room);
     else
         draw_indexed(type, n, itype, iat, 1);
@@ -2641,6 +2715,18 @@ static void mtl_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
         VT("clear %08X %ux%u flags %X rect %lu,%lu %lux%lu depth %p\n", s->va, s->pw, s->ph, flags,
            (unsigned long)rect.x, (unsigned long)rect.y, (unsigned long)rect.width,
            (unsigned long)rect.height, (void *)d);
+        /* Tile GPUs can discard old attachment contents on a full clear.
+         * Only use this when a new pass is needed anyway: restarting an
+         * active pass would add a tile store/load. Partial rectangles and
+         * colour masks retain the drawing path below. */
+        if (!rect.x && !rect.y && rect.width == s->pw && rect.height == s->ph
+            && (!d || (d->pw == s->pw && d->ph == s->ph))
+            && !(s_enc && s_rt == s && s_rt_depth == d)) {
+            begin_pass_clear(s, d, (color ? 0xF0u : 0) | (dz ? flags & 3u : 0),
+                             c, z, zstencil & 0xFF);
+            s->gen++;
+            return;
+        }
         begin_pass(s, d);
         {
             MTLViewport vp = { (double)rect.x, (double)rect.y, (double)rect.width,
@@ -2664,6 +2750,7 @@ static void mtl_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
             s_sc_cur = rect;
             s_cur_pipe = nil;
             s_dyn_valid = 0;
+            bindings_reset();
         }
         s->gen++;
     }
@@ -2724,6 +2811,7 @@ static void present(MtSurf *s)
             lw = lh * 16.0 / 9.0;
         scale = ww / lw < wh / lh ? ww / lw : wh / lh;
         dw = (double)(int)(lw * scale); dh = (double)(int)(lh * scale);
+        if (xbox_apple_screen_fill()) { dw = ww; dh = wh; }
         draw_copy(s->tex, s->pw, s->ph, drawable.texture, 0, 1,
                   (double)(((int)ww - (int)dw) / 2), (double)(((int)wh - (int)dh) / 2), dw, dh);
     } else {
@@ -2741,6 +2829,7 @@ static void mtl_flip_inner(void)
 
     if (!ready())
         return;
+    xbox_apple_limit_frame();
     pend_flush();
     s_frame++;
     if (s_inst_alt)
@@ -2797,6 +2886,14 @@ static void mtl_flip_inner(void)
                 xbox_vblank_report(dt, vb, sizeof vb);
                 fprintf(stderr, "[fps] %.1f fps (frame %u), %s\n",
                         (s_frame - last_frame) / dt, s_frame, vb);
+                pthread_mutex_lock(&s_gpu_stats_lock);
+                double gpu_ms = s_gpu_ms, gpu_max_ms = s_gpu_max_ms;
+                uint64_t gpu_samples = s_gpu_samples;
+                s_gpu_ms = s_gpu_max_ms = 0; s_gpu_samples = 0;
+                pthread_mutex_unlock(&s_gpu_stats_lock);
+                if (gpu_samples)
+                    fprintf(stderr, "[gpu] command buffers: %.2f ms average, %.2f ms maximum, %llu completed (GPU execution, excludes queue wait)\n",
+                            gpu_ms / gpu_samples, gpu_max_ms, (unsigned long long)gpu_samples);
                 last_frame = s_frame;
                 last = now;
             }

@@ -66,7 +66,7 @@ extern void xbe_entry_point(void);
 extern int recomp_dispatch_init(void);
 extern void xbox_path_init(const char *game_dir, const char *save_dir);
 
-#define NFSU2_ENTRY_POINT 0x0021B1CEu
+#include "region_profile.h"
 
 
 #if defined(__SWITCH__)
@@ -368,11 +368,14 @@ static int game_main(void)
         const char *e = getenv("NFSU2_SIM_STEPS");
         float steps = e ? (float)atof(e) : 6.0f;
         if (steps >= 1.0f && steps <= 30.0f) {
+            /* The PAL cap address has not yet been verified. */
+#ifndef NFSU2_REGION_PAL
             float *cap = (float *)((uint8_t *)xbox_GetMemoryBase() + 0x3A4C64);
             if (*cap == 3.0f) {
                 *cap = steps;
                 printf("[BOOT] game time cap %.0f ms per frame\n", steps * 1000.0f / 60.0f);
             }
+#endif
         }
     }
 
