@@ -22,7 +22,11 @@ def prepare(xbe, output):
               'void sub_002A9450(void) { crt_memmove(); }\n',
               source[source.index('/* ── D3D fence wait'):source.index('/* ── VP6 movie frames')],
               source[source.index('/* ── VP6 movie frames'):source.index('/* ── Float to integer')],
-              source[source.index('/* ── Movie colour conversion'):]]
+              source[source.index('/* ── Movie colour conversion'):source.index('/* ── Options -> Video')],
+              # The added Options rows (Video, Vibration, kept Audio volumes)
+              # hook NTSC-U menu code and data that have no PAL mapping yet.
+              'void nfsu2_options_load(void) { }\n',
+              source[source.index('/* ── Manual function overrides'):]]
     adapted = '\n'.join(pieces)
 
     addresses = {
