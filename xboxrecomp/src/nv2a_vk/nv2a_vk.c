@@ -3956,7 +3956,16 @@ static void dump_fxaa(VkSurf *s, const char *path)
 /* The host's per-frame hook (switch_saltynx.c: the frame rate for SaltyNX
  * overlays), with the rendered picture's size. Weak and undefined
  * elsewhere: the call is skipped. */
+#if defined(__APPLE__)
+/* ld64 refuses an undefined weak reference: a weak default instead. */
+__attribute__((weak)) void nv2a_host_frame_presented(uint32_t width, uint32_t height)
+{
+    (void)width;
+    (void)height;
+}
+#else
 extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
+#endif
 
 static void vk_flip(void)
 {
