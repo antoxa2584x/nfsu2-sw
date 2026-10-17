@@ -4,5 +4,6 @@
 
 /* Register the Vulkan back end with the executor (nv2a_backend.h). */
 void nv2a_vk_install(void);
+int nv2a_vk_probe(void);   /* init now; 0 = unusable, use another renderer */
 
 #endif

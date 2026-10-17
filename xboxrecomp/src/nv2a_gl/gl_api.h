@@ -117,7 +117,6 @@ typedef ptrdiff_t     GLintptr;
     X(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
     X(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glGetIntegerv, (GLenum, GLint *)) \
-    X(void, glClearDepth, (GLdouble)) \
     X(void, glClearStencil, (GLint)) \
     X(void, glClear, (GLbitfield)) \
     X(void, glEnable, (GLenum)) \
@@ -127,7 +126,6 @@ typedef ptrdiff_t     GLintptr;
     X(void, glBlendColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glDepthFunc, (GLenum)) \
     X(void, glDepthMask, (GLboolean)) \
-    X(void, glDepthRange, (GLdouble, GLdouble)) \
     X(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
     X(void, glStencilFunc, (GLenum, GLint, GLuint)) \
     X(void, glStencilOp, (GLenum, GLenum, GLenum)) \
@@ -191,10 +189,32 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(void, glDrawElements, (GLenum, GLsizei, GLenum, const void *)) \
     X(void, glDrawArrays, (GLenum, GLint, GLsizei))
 
+/* Depth entry points differ: desktop GL takes doubles, OpenGL ES floats. */
+#define NV2A_GL_FUNCS_DESKTOP(X) \
+    X(void, glClearDepth, (GLdouble)) \
+    X(void, glDepthRange, (GLdouble, GLdouble))
+#define NV2A_GL_FUNCS_ES(X) \
+    X(void, glClearDepthf, (GLfloat)) \
+    X(void, glDepthRangef, (GLfloat, GLfloat))
+
 #define NV2A_GL_DECLARE(ret, name, args) \
     typedef ret (GLAPIENTRY *PFN_##name) args; extern PFN_##name p_##name;
 NV2A_GL_FUNCS(NV2A_GL_DECLARE)
+NV2A_GL_FUNCS_DESKTOP(NV2A_GL_DECLARE)
+NV2A_GL_FUNCS_ES(NV2A_GL_DECLARE)
 #undef NV2A_GL_DECLARE
+
+/* Nonzero when the context is OpenGL ES 3.x (Android): set by the renderer
+ * before nv2a_gl_load, which then resolves the ES variants. */
+extern int nv2a_gl_is_es;
+
+/* Format of BGRA texels. Desktop GL has GL_BGRA; ES 3 has no BGRA upload, so
+ * the bytes go in as RGBA and the texture is swizzled (R<->B) when sampled. */
+#define NV2A_FMT_BGRA            (nv2a_gl_is_es ? GL_RGBA : GL_BGRA)
+#define GL_TEXTURE_SWIZZLE_R              0x8E42
+#define GL_TEXTURE_SWIZZLE_B              0x8E44
+#define GL_RED                            0x1903
+#define GL_BLUE                           0x1905
 
 /* Resolve every entry point. Returns the number that could not be found
  * (0 on success); `getproc` is SDL_GL_GetProcAddress or equivalent. */
@@ -207,7 +227,8 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glScissor                p_glScissor
 #define glClearColor             p_glClearColor
 #define glGetIntegerv            p_glGetIntegerv
-#define glClearDepth             p_glClearDepth
+static inline void glClearDepth(double d)
+{ if (nv2a_gl_is_es) p_glClearDepthf((GLfloat)d); else p_glClearDepth(d); }
 #define glClearStencil           p_glClearStencil
 #define glClear                  p_glClear
 #define glEnable                 p_glEnable
@@ -217,7 +238,8 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glBlendColor             p_glBlendColor
 #define glDepthFunc              p_glDepthFunc
 #define glDepthMask              p_glDepthMask
-#define glDepthRange             p_glDepthRange
+static inline void glDepthRange(double n, double f)
+{ if (nv2a_gl_is_es) p_glDepthRangef((GLfloat)n, (GLfloat)f); else p_glDepthRange(n, f); }
 #define glColorMask              p_glColorMask
 #define glStencilFunc            p_glStencilFunc
 #define glStencilOp              p_glStencilOp

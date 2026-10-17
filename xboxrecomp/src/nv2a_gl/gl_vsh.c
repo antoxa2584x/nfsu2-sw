@@ -324,12 +324,90 @@ static const char s_vk_prelude[] =
     "                w > 0.0 ? clamp(z, 0.0, w) : z, w);\n"
     "}\n";
 
+/* The part of the desktop/ES prelude after the attribute declarations. */
+#define NV2A_GL_PRELUDE_BODY \
+        "uniform vec4 c[192];\n" \
+        "uniform vec4 u_surf;      /* 2/W, 2/H, 1/zmax, scale offset */\n" \
+        "uniform vec2 u_aa;        /* logical -> real pixels */\n" \
+        "uniform vec4 u_m[4];      /* fixed-function composite rows */\n" \
+        "uniform vec4 u_vpoff;     /* fixed-function viewport offset */\n" \
+        "out vec4 vD0; out vec4 vD1; out vec4 vT0; out vec4 vT1;\n" \
+        "out vec4 vT2; out vec4 vT3; out float vFog;\n" \
+        "vec4 R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11;\n" \
+        "vec4 oPos, o1, o2, oD0, oD1, oFog, oPts, oB0, oB1, oT0, oT1, oT2, oT3;\n" \
+        "float nv2a_rcp(float x) { return x != 0.0 ? 1.0 / x : 1.884467e+19; }\n" \
+        "float nv2a_rcc(float x) {\n" \
+        "    float y = nv2a_rcp(x); float a = clamp(abs(y), 5.42101e-20, 1.884467e+19);\n" \
+        "    return y < 0.0 ? -a : a;\n" \
+        "}\n" \
+        "vec4 nv2a_exp(float x) { float f = floor(x); return vec4(exp2(f), x - f, exp2(x), 1.0); }\n" \
+        "vec4 nv2a_log(float x) {\n" \
+        "    float a = abs(x);\n" \
+        "    if (a == 0.0) return vec4(-1.884467e+19, 1.0, -1.884467e+19, 1.0);\n" \
+        "    float e = floor(log2(a));\n" \
+        "    return vec4(e, a / exp2(e), log2(a), 1.0);\n" \
+        "}\n" \
+        "vec4 nv2a_lit(vec4 s) {\n" \
+        "    float lx = max(s.x, 0.0), ly = max(s.y, 0.0), w = clamp(s.w, -127.996, 127.996);\n" \
+        "    return vec4(1.0, lx, (lx > 0.0 && ly > 0.0) ? exp2(w * log2(ly)) : 0.0, 1.0);\n" \
+        "}\n" \
+        "/* screen*w (real pixels) and clip w to GL clip space. */\n" \
+        /* z clamped to the clip volume: the NV2A clamps depth rather than
+         * clipping at the near and far planes, and GL_DEPTH_CLAMP alone did
+         * not reach every driver -- on Eden NFSU2's loading screen, drawn at
+         * z = 1.0, still vanished. (OpenGL ES has no GL_DEPTH_CLAMP at all:
+         * this clamp is all there is.) */ \
+        NV2A_SNAP_GLSL \
+        "vec4 nv2a_clip(vec3 sw, float w) {\n" \
+        "    float z = sw.z * u_surf.z * 2.0 - w;\n" \
+        "    sw.xy = nv2a_snap(sw.xy, w);\n" \
+        "    return vec4(sw.x * u_surf.x - w, sw.y * u_surf.y - w,\n" \
+        "                clamp(z, -abs(w), abs(w)), w);\n" \
+        "}\n"
+
 int nv2a_shader_vk;
+int nv2a_shader_es;
+
+/* ES: no GL_ARB_vertex_array_bgra, so a D3DCOLOR attribute (BGRA bytes) is
+ * fetched as RGBA and swapped here when its bit is set in u_bgra. The
+ * program's own code keeps reading v0..v15. */
+#define NV2A_ES_ATTR_COPY "uniform int u_bgra;\n"
+static const char *es_attr_load(void)
+{
+    static char buf[2048];
+    if (!buf[0]) {
+        size_t n = 0;
+        int i;
+        n += (size_t)snprintf(buf + n, sizeof buf - n, "void nv2a_load_attrs() {\n");
+        for (i = 0; i < 16; i++)
+            n += (size_t)snprintf(buf + n, sizeof buf - n,
+                "    v%d = ((u_bgra >> %d) & 1) != 0 ? a%d.zyxw : a%d;\n", i, i, i, i);
+        snprintf(buf + n, sizeof buf - n, "}\n");
+    }
+    return buf;
+}
 
 const char *nv2a_gl_vsh_prelude(void)
 {
     if (nv2a_shader_vk)
         return s_vk_prelude;
+    if (nv2a_shader_es) {
+        static char buf[8192];
+        if (!buf[0]) {
+            size_t n = 0;
+            int i;
+            n += (size_t)snprintf(buf + n, sizeof buf - n,
+                "#version 300 es\nprecision highp float;\nprecision highp int;\n");
+            for (i = 0; i < 16; i++)
+                n += (size_t)snprintf(buf + n, sizeof buf - n,
+                    "layout(location = %d) in vec4 a%d;\n", i, i);
+            n += (size_t)snprintf(buf + n, sizeof buf - n,
+                "vec4 v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15;\n");
+            n += (size_t)snprintf(buf + n, sizeof buf - n, "%s%s%s", NV2A_ES_ATTR_COPY,
+                                  es_attr_load(), NV2A_GL_PRELUDE_BODY);
+        }
+        return buf;
+    }
     return
         "#version 330 core\n"
         "layout(location = 0) in vec4 v0;\n"
@@ -348,43 +426,7 @@ const char *nv2a_gl_vsh_prelude(void)
         "layout(location = 13) in vec4 v13;\n"
         "layout(location = 14) in vec4 v14;\n"
         "layout(location = 15) in vec4 v15;\n"
-        "uniform vec4 c[192];\n"
-        "uniform vec4 u_surf;      /* 2/W, 2/H, 1/zmax, scale offset */\n"
-        "uniform vec2 u_aa;        /* logical -> real pixels */\n"
-        "uniform vec4 u_m[4];      /* fixed-function composite rows */\n"
-        "uniform vec4 u_vpoff;     /* fixed-function viewport offset */\n"
-        "out vec4 vD0; out vec4 vD1; out vec4 vT0; out vec4 vT1;\n"
-        "out vec4 vT2; out vec4 vT3; out float vFog;\n"
-        "vec4 R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11;\n"
-        "vec4 oPos, o1, o2, oD0, oD1, oFog, oPts, oB0, oB1, oT0, oT1, oT2, oT3;\n"
-        "float nv2a_rcp(float x) { return x != 0.0 ? 1.0 / x : 1.884467e+19; }\n"
-        "float nv2a_rcc(float x) {\n"
-        "    float y = nv2a_rcp(x); float a = clamp(abs(y), 5.42101e-20, 1.884467e+19);\n"
-        "    return y < 0.0 ? -a : a;\n"
-        "}\n"
-        "vec4 nv2a_exp(float x) { float f = floor(x); return vec4(exp2(f), x - f, exp2(x), 1.0); }\n"
-        "vec4 nv2a_log(float x) {\n"
-        "    float a = abs(x);\n"
-        "    if (a == 0.0) return vec4(-1.884467e+19, 1.0, -1.884467e+19, 1.0);\n"
-        "    float e = floor(log2(a));\n"
-        "    return vec4(e, a / exp2(e), log2(a), 1.0);\n"
-        "}\n"
-        "vec4 nv2a_lit(vec4 s) {\n"
-        "    float lx = max(s.x, 0.0), ly = max(s.y, 0.0), w = clamp(s.w, -127.996, 127.996);\n"
-        "    return vec4(1.0, lx, (lx > 0.0 && ly > 0.0) ? exp2(w * log2(ly)) : 0.0, 1.0);\n"
-        "}\n"
-        "/* screen*w (real pixels) and clip w to GL clip space. */\n"
-        /* z clamped to the clip volume: the NV2A clamps depth rather than
-         * clipping at the near and far planes, and GL_DEPTH_CLAMP alone did
-         * not reach every driver -- on Eden NFSU2's loading screen, drawn at
-         * z = 1.0, still vanished. */
-        NV2A_SNAP_GLSL
-        "vec4 nv2a_clip(vec3 sw, float w) {\n"
-        "    float z = sw.z * u_surf.z * 2.0 - w;\n"
-        "    sw.xy = nv2a_snap(sw.xy, w);\n"
-        "    return vec4(sw.x * u_surf.x - w, sw.y * u_surf.y - w,\n"
-        "                clamp(z, -abs(w), abs(w)), w);\n"
-        "}\n";
+        NV2A_GL_PRELUDE_BODY;
 }
 
 #define NV2A_VSH_MAIN(set_ib) \
@@ -406,6 +448,8 @@ const char *nv2a_gl_vsh_main_program(void)
 {
     if (nv2a_shader_vk)
         return NV2A_VSH_MAIN("    nv2a_ib = gl_InstanceIndex * 192;\n");
+    if (nv2a_shader_es)
+        return NV2A_VSH_MAIN("    nv2a_load_attrs();\n");
     return NV2A_VSH_MAIN("");
 }
 
@@ -430,5 +474,28 @@ const char *nv2a_gl_vsh_fixed(void)
         "    vD0 = clamp(v3, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
         "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = 0.0;\n"
         "}\n";
+    if (nv2a_shader_es) {
+        static char es_body[2048];
+        if (!es_body[0])
+            snprintf(es_body, sizeof es_body, "%s",
+                     "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
+                     "void main() {\n"
+                     "    nv2a_load_attrs();\n"
+                     "    if (u_xform == 1) {\n"
+                     "        vec4 clip = vec4(dot(u_m[0], v0), dot(u_m[1], v0),\n"
+                     "                         dot(u_m[2], v0), dot(u_m[3], v0));\n"
+                     "        float w = abs(clip.w) < 1e-6 ? 1e-6 : clip.w;\n"
+                     "        vec3 sw = clip.xyz + u_vpoff.xyz * w;\n"
+                     "        sw.xy *= u_aa;\n"
+                     "        gl_Position = nv2a_clip(sw, w);\n"
+                     "    } else {\n"
+                     "        float w = (v0.w > 0.0) ? 1.0 / v0.w : 1.0;\n"
+                     "        gl_Position = nv2a_clip(v0.xyz * w, w);\n"
+                     "    }\n"
+                     "    vD0 = clamp(v3, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
+                     "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = 0.0;\n"
+                     "}\n");
+        return es_body;
+    }
     return nv2a_shader_vk ? body + sizeof decl - 1 : body;
 }

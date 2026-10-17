@@ -2179,6 +2179,18 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          * VirtualFree releases just the slice about to be used, so each view
          * replaces our own reservation rather than racing for free space. */
         g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
+#if defined(__ANDROID__)
+        /* Reserve the whole 4 GB guest space, so the windows above the RAM
+         * mirrors (0x80000000, 0xF0000000, 0xFD000000...) land inside memory
+         * we already hold. See w32_reserve_guest_space. */
+        {
+            extern void *w32_reserve_guest_space(size_t size);
+            void *r = w32_reserve_guest_space((size_t)0x100000000ull);
+            g_span_base = r ? (LPVOID)((uintptr_t)r + XBOX_MAP_START) : NULL;
+            if (r) fprintf(stderr, "  Guest space: 4 GB reserved at %p\n", r);
+        }
+        if (!g_span_base)
+#endif
         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
         if (g_span_base) {
             VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);

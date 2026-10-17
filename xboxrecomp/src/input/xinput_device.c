@@ -257,6 +257,86 @@ static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
 static DWORD g_packet[XBOX_MAX_CONTROLLERS];
 
+#if defined(__ANDROID__)
+/* On-screen controls (android/.../TouchControlsView.java, state kept by
+ * src/android_host.c). They stand in for player 1 while no physical pad is
+ * attached to port 0. Returns 0 when the overlay is hidden. */
+extern int nfsu2_android_touch_read(uint32_t *mask, uint8_t *lt, uint8_t *rt,
+                                    int16_t th[4]);
+
+/* Pads connect after boot (Bluetooth): look again once a second, and drop
+ * the ones that went away. */
+static void android_rescan(void)
+{
+    static Uint32 last;
+    Uint32 now = SDL_GetTicks();
+    int i;
+
+    if (now - last < 1000)
+        return;
+    last = now;
+    for (i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
+        if (g_pads[i] && !SDL_GameControllerGetAttached(g_pads[i])) {
+            SDL_GameControllerClose(g_pads[i]);
+            g_pads[i] = NULL;
+            g_controller_connected[i] = FALSE;
+        }
+    }
+    {
+        int slot;
+        for (slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++)
+            if (!g_pads[slot]) break;
+        if (slot < XBOX_MAX_CONTROLLERS) {
+            int n = SDL_NumJoysticks();
+            for (i = 0; i < n && slot < XBOX_MAX_CONTROLLERS; i++) {
+                if (!SDL_IsGameController(i))
+                    continue;
+                {
+                    SDL_GameController *c = SDL_GameControllerOpen(i);
+                    int dup = 0, k;
+                    if (!c) continue;
+                    for (k = 0; k < XBOX_MAX_CONTROLLERS; k++)
+                        if (g_pads[k] == c) dup = 1;
+                    if (dup) continue;   /* already ours (open counts refs) */
+                    g_pads[slot] = c;
+                    g_controller_connected[slot] = TRUE;
+                    while (++slot < XBOX_MAX_CONTROLLERS && g_pads[slot]) { }
+                }
+            }
+        }
+    }
+}
+
+static int android_touch_state(XBOX_INPUT_STATE *pState, DWORD port)
+{
+    uint32_t m;
+    uint8_t lt, rt;
+    int16_t th[4];
+    WORD btn;
+
+    if (!nfsu2_android_touch_read(&m, &lt, &rt, th))
+        return 0;
+    memset(pState, 0, sizeof(XBOX_INPUT_STATE));
+    pState->dwPacketNumber = ++g_packet[port];
+    btn = (WORD)(m & 0x00FF);            /* dpad, start, back, thumbs */
+    pState->Gamepad.wButtons = btn;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_A] = (m & 0x1000) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_B] = (m & 0x2000) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_X] = (m & 0x4000) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] = (m & 0x8000) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] = (m & 0x0100) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] = (m & 0x0200) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] = lt;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_RTRIGGER] = rt;
+    pState->Gamepad.sThumbLX = th[0];
+    pState->Gamepad.sThumbLY = th[1];
+    pState->Gamepad.sThumbRX = th[2];
+    pState->Gamepad.sThumbRY = th[3];
+    g_controller_connected[port] = TRUE;
+    return 1;
+}
+#endif
+
 /* Open up to XBOX_MAX_CONTROLLERS attached game controllers. */
 static void open_controllers(void)
 {
@@ -314,8 +394,16 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     }
 #endif
 
+#if defined(__ANDROID__)
+    if (dwPort == 0)
+        android_rescan();
+#endif
     SDL_GameController *c = g_pads[dwPort];
     if (!c || !SDL_GameControllerGetAttached(c)) {
+#if defined(__ANDROID__)
+        if (dwPort == 0 && android_touch_state(pState, dwPort))
+            return ERROR_SUCCESS;
+#endif
         g_controller_connected[dwPort] = FALSE;
         return ERROR_DEVICE_NOT_CONNECTED;
     }
@@ -401,8 +489,13 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
     (void)dwFlags;
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pCaps)
         return ERROR_DEVICE_NOT_CONNECTED;
-    if (!g_pads[dwPort])
+    if (!g_pads[dwPort]) {
+#if defined(__ANDROID__)
+        uint32_t m; uint8_t l, r; int16_t t[4];
+        if (!(dwPort == 0 && nfsu2_android_touch_read(&m, &l, &r, t)))
+#endif
         return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     memset(pCaps, 0, sizeof(XBOX_INPUT_CAPABILITIES));
     pCaps->Type    = 1;   /* XINPUT_DEVTYPE_GAMEPAD */

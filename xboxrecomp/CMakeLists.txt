@@ -76,8 +76,12 @@ add_subdirectory(src/video)
 
 # Renderer for the pushbuffer executor (Linux, macOS, Switch): OpenGL, or
 # Vulkan with XBOXRECOMP_VULKAN=ON. Windows keeps its D3D11 path.
+# Android builds both and picks one at run time (the game's launcher setting).
 if(NOT WIN32)
-    if(XBOXRECOMP_VULKAN)
+    if(ANDROID AND XBOXRECOMP_VULKAN)
+        add_subdirectory(src/nv2a_gl)
+        add_subdirectory(src/nv2a_vk)
+    elseif(XBOXRECOMP_VULKAN)
         add_subdirectory(src/nv2a_vk)
     else()
         add_subdirectory(src/nv2a_gl)
@@ -99,7 +103,9 @@ target_link_libraries(xboxrecomp INTERFACE
     xbox_video
 )
 if(NOT WIN32)
-    if(XBOXRECOMP_VULKAN)
+    if(ANDROID AND XBOXRECOMP_VULKAN)
+        target_link_libraries(xboxrecomp INTERFACE xbox_nv2a_vk xbox_nv2a_gl)
+    elseif(XBOXRECOMP_VULKAN)
         target_link_libraries(xboxrecomp INTERFACE xbox_nv2a_vk)
     else()
         target_link_libraries(xboxrecomp INTERFACE xbox_nv2a_gl)

@@ -2874,7 +2874,27 @@ static int kernel_raise_interrupt(uint32_t vector)
  * Late frames need nothing more: NFSU2's D3D flips a frame that missed its
  * vblank as soon as it is queued (sub_002F2080, the immediate-when-late
  * flag), so frame times are not quantised to whole vblanks. */
-#define VBLANK_PERIOD_US 16683                    /* 59.94 Hz */
+#define VBLANK_PERIOD_DEFAULT_US 16683            /* 59.94 Hz */
+
+/* RECOMP_VBLANK_HZ=<hz> raises (or lowers) the display rate the title sees.
+ * NFSU2 flips every second vblank in a race, so 120 gives races at 60 fps
+ * and 240 at 120 fps (experimental: the game logic is time based, but
+ * nothing here has checked every system against it). Menus then run at
+ * twice that. */
+static long long vb_period_us(void)
+{
+    static long long period;
+    if (!period) {
+        const char *e = getenv("RECOMP_VBLANK_HZ");
+        double hz = e ? atof(e) : 0.0;
+        period = (hz >= 20.0 && hz <= 480.0) ? (long long)(1e6 / hz + 0.5)
+                                              : VBLANK_PERIOD_DEFAULT_US;
+        if (period != VBLANK_PERIOD_DEFAULT_US)
+            fprintf(stderr, "[vblank] %.2f Hz (RECOMP_VBLANK_HZ)\n", 1e6 / (double)period);
+    }
+    return period;
+}
+#define VBLANK_PERIOD_US vb_period_us()
 
 static long long vb_now_us(void)
 {

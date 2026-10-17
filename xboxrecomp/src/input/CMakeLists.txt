@@ -13,7 +13,10 @@ target_include_directories(xbox_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(WIN32)
     target_link_libraries(xbox_input PUBLIC platform xinput)
 else()
-    find_package(SDL2 REQUIRED)
+    # Android: SDL2 is built in-tree by the top-level project.
+    if(NOT TARGET SDL2::SDL2)
+        find_package(SDL2 REQUIRED)
+    endif()
     target_link_libraries(xbox_input PUBLIC platform SDL2::SDL2)
 endif()
 

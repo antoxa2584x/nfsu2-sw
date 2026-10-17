@@ -12,6 +12,8 @@ int nv2a_gl_vsh_program(const uint32_t (*prog)[4], uint32_t slots,
 
 /* Nonzero: emit Vulkan GLSL (nv2a_vk). Set once, before the first shader. */
 extern int nv2a_shader_vk;
+/* Nonzero: emit GLSL ES 3.00 (nv2a_gl on Android). */
+extern int nv2a_shader_es;
 
 /* Declarations and helpers every vertex shader starts with. */
 const char *nv2a_gl_vsh_prelude(void);

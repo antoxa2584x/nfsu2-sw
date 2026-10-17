@@ -10,6 +10,7 @@
  * looked for:
  *   Windows/Linux: $NFSU2_GAME_DIR, else ./game
  *   Switch:        sdmc:/switch/nfsu2x/game
+ *   Android:       <app external files dir>/game (src/android_host.c)
  */
 
 #ifdef _WIN32
@@ -31,6 +32,14 @@
 void switch_boot(void);
 void switch_shutdown(void);
 void switch_error_dialog(const char *msg, const char *details);
+#elif defined(__ANDROID__)
+/* src/android_host.c: logcat + log file, nfsu2x_env.txt, storage paths.
+ * SDL's Java side starts the process by calling SDL_main in this library. */
+void android_boot(void);
+const char *android_game_dir(void);
+const char *android_save_dir(void);
+int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *message,
+                             void *window);
 #elif !defined(_WIN32)
 int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *message,
                              void *window);
@@ -72,6 +81,9 @@ extern void xbox_path_init(const char *game_dir, const char *save_dir);
 #if defined(__SWITCH__)
 #  define NFSU2_DEFAULT_GAME_DIR "sdmc:/switch/nfsu2x/game"
 #  define NFSU2_DEFAULT_SAVE_DIR "sdmc:/switch/nfsu2x/save"
+#elif defined(__ANDROID__)
+#  define NFSU2_DEFAULT_GAME_DIR android_game_dir()
+#  define NFSU2_DEFAULT_SAVE_DIR android_save_dir()
 #else
 #  define NFSU2_DEFAULT_GAME_DIR "game"
 #  define NFSU2_DEFAULT_SAVE_DIR NULL
@@ -157,7 +169,48 @@ static void install_crash_reporter(void)
 /* The CPU exception handler is in switch_nx.c; it calls print_guest_state. */
 static void install_crash_reporter(void) {}
 #else
+#if defined(__ANDROID__)
+/* execinfo.h only exists from API 33: walk the stack with the unwinder and
+ * name the frames with dladdr. */
+#include <dlfcn.h>
+#include <unwind.h>
+
+struct bt_state { void **frames; int n, max; };
+
+static _Unwind_Reason_Code bt_cb(struct _Unwind_Context *ctx, void *arg)
+{
+    struct bt_state *st = (struct bt_state *)arg;
+    uintptr_t pc = _Unwind_GetIP(ctx);
+    if (pc && st->n < st->max)
+        st->frames[st->n++] = (void *)pc;
+    return st->n >= st->max ? _URC_END_OF_STACK : _URC_NO_REASON;
+}
+
+static int backtrace(void **frames, int max)
+{
+    struct bt_state st = { frames, 0, max };
+    _Unwind_Backtrace(bt_cb, &st);
+    return st.n;
+}
+
+static void backtrace_symbols_fd(void *const *frames, int n, int fd)
+{
+    int i;
+    (void)fd;
+    for (i = 0; i < n; i++) {
+        Dl_info di;
+        if (dladdr(frames[i], &di) && di.dli_sname)
+            fprintf(stderr, "    %s+0x%zx (%s)\n", di.dli_sname,
+                    (size_t)((uintptr_t)frames[i] - (uintptr_t)di.dli_saddr),
+                    di.dli_fname ? di.dli_fname : "?");
+        else
+            fprintf(stderr, "    %p (%s)\n", frames[i],
+                    di.dli_fname ? di.dli_fname : "?");
+    }
+}
+#else
 #include <execinfo.h>
+#endif
 
 static void crash_signal(int sig, siginfo_t *si, void *uc)
 {
@@ -248,21 +301,32 @@ void xbox_gil_mark_main(void);
 void nfsu2_text_patch_init(void);    /* text_patch.c: Switch button names */
 void nfsu2_options_load(void);      /* recomp_manual.c: Options -> Video rows */
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(__ANDROID__)
 #include <pthread.h>
 /* The first guest thread runs inline on whichever host thread boots the
  * title, and Horizon's main thread stack is small for recompiled code; boot
  * on a thread with a stack sized like a desktop main thread instead. */
+#ifdef __SWITCH__
 void xbox_nx_spread_thread(void);   /* win32_compat.c: off core 0, all cores allowed */
 void xbox_nx_track_thread(void *entry);   /* win32_compat.c: Switch [perf] report */
+#endif
 
 static void *game_thread(void *arg)
 {
+#ifdef __SWITCH__
     xbox_nx_spread_thread();
     xbox_nx_track_thread(NULL);          /* "game:" in the [perf] report */
+#endif
     *(int *)arg = game_main();
     return NULL;
 }
+
+#ifdef __ANDROID__
+/* SDLActivity's native thread calls SDL_main (SDL_main.h renames main the
+ * same way; this file avoids SDL.h, whose names the Win32 vocabulary shadows). */
+__attribute__((visibility("default"))) int SDL_main(int argc, char **argv);
+#define main SDL_main
+#endif
 
 int main(int argc, char **argv)
 {
@@ -272,14 +336,20 @@ int main(int argc, char **argv)
 
     (void)argc;
     (void)argv;
+#ifdef __SWITCH__
     switch_boot();
+#else
+    android_boot();
+#endif
     pthread_attr_init(&attr);
     pthread_attr_setstacksize(&attr, 16u * 1024 * 1024);
     if (pthread_create(&th, &attr, game_thread, &rc) == 0)
         pthread_join(th, NULL);
     else
         fprintf(stderr, "[FATAL] cannot start the game thread\n");
+#ifdef __SWITCH__
     switch_shutdown();
+#endif
     return rc;
 }
 #else
@@ -408,7 +478,22 @@ static int game_main(void)
     {
         const char *gl = getenv("NFSU2_GL");
         if (!gl || strcmp(gl, "0") != 0) {
-#if defined(NFSU2_VULKAN)
+#if defined(NFSU2_VULKAN) && defined(__ANDROID__)
+            /* Both renderers are in the library; the launcher picks one
+             * (RECOMP_RENDERER=vulkan). OpenGL ES is the default, and the
+             * fallback when Vulkan cannot start on this device. */
+            const char *want = getenv("RECOMP_RENDERER");
+            extern void nv2a_vk_install(void);
+            extern int nv2a_vk_probe(void);
+            extern void nv2a_gl_install(void);
+            if (want && !strcmp(want, "vulkan") && nv2a_vk_probe()) {
+                nv2a_vk_install();
+            } else {
+                if (want && !strcmp(want, "vulkan"))
+                    fprintf(stderr, "[BOOT] Vulkan could not start; using OpenGL ES\n");
+                nv2a_gl_install();
+            }
+#elif defined(NFSU2_VULKAN)
             extern void nv2a_vk_install(void);
             nv2a_vk_install();
 #else

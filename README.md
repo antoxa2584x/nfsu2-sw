@@ -2,18 +2,22 @@
 
 <img src="https://cdn2.steamgriddb.com/logo/4b29fa4efe4fb7bc667c7b301b74d52d.png" alt="Need for Speed: Underground 2" width="520">
 
-### Xbox static recompilation for Nintendo Switch and Linux
+### Xbox static recompilation for Nintendo Switch and Linux, Android in beta
 
-The original Xbox (NTSC-U) release of **Need for Speed: Underground 2**, lifted
-instruction by instruction to C and running natively, with no emulator.
+The original Xbox (NTSC-U) release of **Need for Speed: Underground 2**, translated
+instruction by instruction to C and built as a native program. There is no emulator:
+the game's own x86 code runs as compiled C on top of a small runtime that stands in for
+the Xbox kernel, the NV2A GPU and the APU audio hardware.
 
 ![Switch](https://img.shields.io/badge/Nintendo%20Switch-homebrew-E60012?logo=nintendoswitch&logoColor=white)
+![Android](https://img.shields.io/badge/Android-arm64%20%28beta%29-3DDC84?logo=android&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?logo=linux&logoColor=black)
+![PS Vita](https://img.shields.io/badge/PS%20Vita-planned-lightgrey?logo=playstation&logoColor=white)
 ![Vulkan](https://img.shields.io/badge/Vulkan-1.3-AC162C?logo=vulkan&logoColor=white)
 ![OpenGL](https://img.shields.io/badge/OpenGL-renderer-5586A4?logo=opengl&logoColor=white)
 ![Version](https://img.shields.io/badge/version-0.5.10-blue)
 
-[Features](#-features) · [Playing on Switch](#-playing-on-switch) · [Building](#%EF%B8%8F-building) · [Configuration](#%EF%B8%8F-configuration) · [Status](#-status)
+[Features](#features) · [Playing on Switch](#playing-on-switch) · [Building](#building) · [Configuration](#configuration) · [Status](#status)
 
 </div>
 
@@ -21,6 +25,32 @@ instruction by instruction to C and running natively, with no emulator.
 
 > [!IMPORTANT]
 > **No game data is included.** You need your own copy of the Xbox disc,
+> extracted (`default.xbe`, `NFSUNDER/`, ...). The lifted C (`gen/`) is generated from
+> your `default.xbe` and is never committed.
+
+## Platforms
+
+| Platform | State | Where |
+|---|---|---|
+| Linux x86_64 | Working: boot, movies, profile, Main Menu, Quick Race and Career, with audio | this branch |
+| Nintendo Switch | Working on hardware: boot, movies, profile, Main Menu, races | this branch |
+| Android arm64 | **Beta.** Builds with the NDK and runs on a phone: ISO install, rendering and touch controls work. Performance is not measured yet | [`android/`](android/README.md) |
+| PS Vita | **Plan only.** No code, nothing evaluated beyond a first look | none |
+
+## Features
+
+- **Native code.** The whole game runs as recompiled C, built with
+  [xboxrecomp](https://github.com/sp00nznet/xboxrecomp).
+- **Two renderers.** OpenGL and Vulkan (NVK on Switch), with render scaling up to 4x.
+- **Widescreen 16:9** by default, through the game's own wide mode.
+- **Full-screen movies**, decoded with FFmpeg (VP6).
+- **Audio** through an emulated Xbox APU, mixed down from 5.1 to stereo.
+- **Two-player split screen**, with Joy-Con pairs or one sideways Joy-Con per player.
+- **Rumble** on Switch HD rumble and SDL controllers.
+- **Switch wording** in the menus (Start becomes `+`, no Xbox Live or hard-disk names).
+- **Saves** stay next to the game, in `game/UDATA`.
+
+## Playing on Switch
 > extracted (`default.xbe`, `NFSUNDER/`, ...).
 
 ## ✨ Features
@@ -70,10 +100,10 @@ sdmc:/switch/nfsu2x/
 ```
 
 Buttons map by label (Switch A = Xbox A). Settings go in `nfsu2x_env.txt`
-(see [Configuration](#%EF%B8%8F-configuration)) and the log is written to the
+(see [Configuration](#configuration)) and the log is written to the
 same folder.
 
-## 🛠️ Building
+## Building
 
 <details open>
 <summary><b>1. Lift the XBE to C</b></summary>
@@ -107,6 +137,26 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 
 </details>
 
+<details>
+<summary><b>2c. Android</b> (beta: NDK, SDL2, OpenGL ES 3 or Vulkan)</summary>
+
+> **Beta.** The port builds and runs on a phone (checked on one device). Frame rate has not
+> been measured and other devices are untested. **PS Vita is only a plan**: there is no Vita
+> code in this repository.
+
+```sh
+android/tools/fetch_deps.sh
+cd android && ./gradlew assembleRelease -Pnfsu2.genDir=/path/to/gen
+```
+
+The app takes the game **ISO**: put it in `Android/data/com.nfsu2x.nfsu2/files/iso/` (or pick it
+in the app). It is extracted automatically and then deleted. A GitHub Actions workflow
+(`.github/workflows/android.yml`) can build the APK for you in a private repository that
+holds your `default.xbe` on a branch named `private-assets`. See
+[`android/README.md`](android/README.md) for requirements, controls and known risks.
+
+</details>
+
 ### Project layout
 
 | Path | What |
@@ -114,12 +164,13 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 | `src/main.c` | boot and runtime defaults |
 | `src/recomp_manual.c` | hand-written overrides of lifted functions |
 | `src/switch_nx.c` | Switch log device, env file, exception handler, loading screen |
+| `src/android_host.c`, `android/` | Android storage paths, env file, logcat, touch pad; Gradle project, SDL activity, on-screen controls |
 | `config/seed_functions.json` | entry points the static pass cannot see |
 | `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A renderers (Vulkan, OpenGL), SDL audio, Switch platform layer, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
 | `switch/build.sh` | Switch NRO build + SD-card staging |
 
-## ⚙️ Configuration
+## Configuration
 
 On Linux these are ordinary environment variables. On the Switch they go in
 `sdmc:/switch/nfsu2x/nfsu2x_env.txt`, one `KEY=VALUE` per line (`#` starts a
@@ -306,17 +357,14 @@ RECOMP_WIDESCREEN=0
 | `RECOMP_FORCE_RETURN` | Read but currently has no effect. |
 
 </details>
-## 🚦 Status
 
-| Platform | State |
-|---|---|
-| 🐧 Linux | Boot, movies, profile, Main Menu, Quick Race and Career, with audio |
-| 🎮 Switch hardware | Boot, movies, profile load/create, Main Menu, races |
+## Status
 
-Still open: cube maps on OpenGL (Vulkan has them: car reflections), bump/dot-product texture modes, fixed-function
-lighting.
+See [Platforms](#platforms) for the per-platform state. Open items shared by the renderers:
+cube maps on OpenGL (Vulkan has them, for the car reflections), bump and dot-product texture
+modes, and fixed-function lighting.
 
-## 📚 More
+## More
 
 - [`CLAUDE.md`](CLAUDE.md): detailed engineering notes
 - [`PERF_NOTES.md`](PERF_NOTES.md): performance work and measurements

@@ -1,0 +1,80 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Inputs the native build needs (see android/README.md).
+def genDir = findProperty('nfsu2.genDir') ?: System.getenv('NFSU2_GEN_DIR')
+if (!genDir) {
+    throw new GradleException("Set nfsu2.genDir (-Pnfsu2.genDir=/path/to/gen) to the lifted C from tools/regen.sh")
+}
+def depsDir      = file("${rootDir}/deps")
+def sdlDir       = file("${depsDir}/SDL")
+def glslangDir   = findProperty('nfsu2.glslangDir') ?: "${depsDir}/glslang-android"
+def ffmpegDir    = findProperty('nfsu2.ffmpegDir') ?: "${depsDir}/ffmpeg-vp6-android"
+def adrenoDir    = findProperty('nfsu2.adrenotoolsDir') ?: "${depsDir}/libadrenotools"
+// Vulkan only on Android (OpenGL ES removed). -Pnfsu2.vulkan=false is ignored.
+def useVulkan    = true
+if (!sdlDir.exists()) {
+    throw new GradleException("SDL2 sources missing: run android/tools/fetch_deps.sh")
+}
+
+android {
+    namespace 'com.nfsu2x'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.nfsu2x.nfsu2'
+        minSdk 29                       // OpenGL ES 3.0 is guaranteed long before; Vulkan renderer needs 1.3 from the driver
+        targetSdk 34
+        versionCode 1
+        versionName '0.5-android'
+
+        ndk { abiFilters 'arm64-v8a' }  // the lifted code is built for one ABI only
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DNFSU2_VULKAN=${useVulkan ? 'ON' : 'OFF'}",
+                          '-DANDROID_STL=c++_static',
+                          '-DANDROID_ARM_NEON=ON',
+                          "-DNFSU2_GEN_DIR=${genDir}",
+                          "-DNFSU2_SDL2_DIR=${sdlDir}",
+                          "-DCMAKE_PREFIX_PATH=${glslangDir}",
+                          "-DCMAKE_FIND_ROOT_PATH=${glslangDir}",
+                          "-DNFSU2_ADRENOTOOLS_DIR=${file(adrenoDir).exists() ? adrenoDir : ''}",
+                          "-DNFSU2_FFMPEG_DIR=${file(ffmpegDir).exists() ? ffmpegDir : ''}"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("${rootDir}/../CMakeLists.txt")
+        }
+    }
+
+    sourceSets {
+        main {
+            // SDLActivity & friends: SDL's own Java glue, taken from the checkout.
+            java.srcDirs += ["${sdlDir}/android-project/app/src/main/java"]
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug   // sideload build; sign properly for distribution
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // libadrenotools (custom Turnip drivers) needs its hook libraries as real
+            // files in nativeLibraryDir, so the libraries are extracted at install.
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}

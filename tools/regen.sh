@@ -24,6 +24,11 @@ XBE="${NFSU2_XBE:-/root/nfsu2x/game/default.xbe}"
 GEN="${NFSU2_GEN_DIR:-/root/nfsu2x/gen}"
 
 cd "$TK"
+# The disassembler reads <xbe stem>_analysis.json beside the XBE.
+ANALYSIS="${XBE%.*}_analysis.json"
+if [ ! -f "$ANALYSIS" ]; then
+    python3 -m tools.xbe_parser "$XBE" --json "$ANALYSIS"
+fi
 if [ "${LIFT_ONLY:-0}" != "1" ]; then
     python3 -m tools.disasm "$XBE" --seed-functions "$HERE/config/seed_functions.json"
     python3 -m tools.func_id "$XBE"

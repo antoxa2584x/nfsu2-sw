@@ -313,9 +313,12 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
             "};\n"
             "layout(location = 0) out vec4 fragColor;\n"
             "void main() {\n");
-    } else
+    } else {
+    emit(&o, "%s", nv2a_shader_es ?
+        "#version 300 es\n"
+        "precision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+        : "#version 330 core\n");
     emit(&o,
-        "#version 330 core\n"
         "in vec4 vD0; in vec4 vD1; in vec4 vT0; in vec4 vT1;\n"
         "in vec4 vT2; in vec4 vT3; in float vFog;\n"
         "uniform sampler2D t0; uniform sampler2D t1;\n"
@@ -327,6 +330,7 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "uniform int u_alpha_func; uniform float u_alpha_ref;\n"
         "out vec4 fragColor;\n"
         "void main() {\n");
+    }
     for (i = 0; i < 4; i++)
         tex_fetch(&o, (int)i, (k->shader_program >> (5 * i)) & 0x1F, k);
     emit(&o,

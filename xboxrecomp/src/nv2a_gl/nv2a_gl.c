@@ -45,6 +45,30 @@
 #include <string.h>
 #include <time.h>
 
+/* ── OpenGL ES 3 (Android) ────────────────────────────────────────────
+ *
+ * The renderer is written for desktop GL 3.3 core; ES 3.0 differs in a few
+ * places, all handled here and in gl_api/gl_vsh/gl_psh:
+ *   - BGRA: ES has no BGRA upload. BGRA bytes go in as RGBA and the texture
+ *     is swizzled R<->B at sampling (es_swizzle); render targets are plain
+ *     RGBA. D3DCOLOR vertex attributes are swapped in the vertex shader
+ *     (u_bgra), there being no GL_ARB_vertex_array_bgra.
+ *   - no GL_DEPTH_CLAMP: the vertex shader's clamp of clip z does the job.
+ *   - GL_CLAMP_TO_BORDER only from ES 3.2.
+ *   - S3TC is an extension; a refused compressed upload already falls back
+ *     to decoding on the CPU.
+ *   - shaders are GLSL ES 3.00 (nv2a_shader_es).
+ */
+static int s_es_border;             /* ES 3.2: GL_CLAMP_TO_BORDER exists */
+
+static void es_swizzle(int bgra)
+{
+    if (!nv2a_gl_is_es)
+        return;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, bgra ? GL_BLUE : GL_RED);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, bgra ? GL_RED : GL_BLUE);
+}
+
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 int nv2a_gl_adopt_window(void **win, void **ctx);
@@ -241,7 +265,7 @@ static GlSurf *surf_get(uint32_t va, uint32_t w, uint32_t h,
     tex_param_forget(s->tex);
     glBindTexture(GL_TEXTURE_2D, s->tex);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)s->pw, (GLsizei)s->ph, 0,
-                 GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+                 NV2A_FMT_BGRA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glGenRenderbuffers(1, &s->ds);
@@ -570,7 +594,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         bind_tex(t->tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, GL_BGRA,
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, (GLsizei)w, (GLsizei)h, NV2A_FMT_BGRA,
                         GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
         gl_step_done("texture upload");
@@ -587,9 +611,10 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         bind_tex(t->tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, (GLint)(pitch / 4));
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, GL_BGRA,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0, NV2A_FMT_BGRA,
                      GL_UNSIGNED_BYTE, (const uint8_t *)xbox_GetMemoryOffset() + va);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        es_swizzle(1);
         tex_account(t, w * h * 4);
         return t->tex;
     }
@@ -614,6 +639,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
                                    (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va);
             if (glGetError() == GL_NO_ERROR) {
+                es_swizzle(0);          /* the GPU decodes it as RGBA */
                 tex_account(t, size);
                 gl_step_done("texture upload");
                 return t->tex;
@@ -641,19 +667,22 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             for (x = 0; x < w; x++)
                 s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+                     NV2A_FMT_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        es_swizzle(1);
         tex_account(t, w * h * 4);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+                     NV2A_FMT_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        es_swizzle(1);
         tex_account(t, w * h * 4);
         gl_step_done("texture upload");
     } else {
         static const uint32_t magenta = 0xFFFF00FFu;
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_BGRA,
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, NV2A_FMT_BGRA,
                      GL_UNSIGNED_BYTE, &magenta);
+        es_swizzle(1);
         tex_account(t, 4);
         if (s_trace)
             fprintf(stderr, "  [GL] texture 0x%08X format 0x%02X not decodable\n",
@@ -667,7 +696,7 @@ static GLint wrap_mode(uint32_t m)
     switch (m) {
     case 2:  return GL_MIRRORED_REPEAT;
     case 3:  return GL_CLAMP_TO_EDGE;
-    case 4:  return GL_CLAMP_TO_BORDER;
+    case 4:  return nv2a_gl_is_es && !s_es_border ? GL_CLAMP_TO_EDGE : GL_CLAMP_TO_BORDER;
     case 5:  return GL_CLAMP_TO_EDGE;
     default: return GL_REPEAT;
     }
@@ -760,7 +789,7 @@ typedef struct {
     uint64_t   vkey;            /* 0: fixed-function; else program hash */
     Nv2aPshKey pkey;
     GLuint     prog;
-    GLint      u_c, u_surf, u_aa, u_m, u_vpoff, u_xform;
+    GLint      u_c, u_surf, u_aa, u_m, u_vpoff, u_xform, u_bgra;
     GLint      u_t[4], u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogcolor, u_afunc, u_aref;
     uint32_t   used;
     int        vpc_valid;       /* vpc holds what this program's "c" was given */
@@ -773,7 +802,7 @@ typedef struct {
     struct GlUni {
         float surf[4], aa[2], m[16], vpoff[4], tscale[4][2];
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref;
-        int   xform, afunc;
+        int   xform, afunc, bgra;
     } uni;
 } GlProg;
 
@@ -1039,6 +1068,7 @@ static GlProg *prog_get(const Nv2aRawBatch *b, const Nv2aPshKey *pk)
     p->u_m = glGetUniformLocation(p->prog, "u_m");
     p->u_vpoff = glGetUniformLocation(p->prog, "u_vpoff");
     p->u_xform = glGetUniformLocation(p->prog, "u_xform");
+    p->u_bgra = glGetUniformLocation(p->prog, "u_bgra");
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
     p->u_c0 = glGetUniformLocation(p->prog, "u_c0");
     p->u_c1 = glGetUniformLocation(p->prog, "u_c1");
@@ -1083,17 +1113,50 @@ static int ready(void)
             fprintf(stderr, "  [GL] SDL video: %s\n", SDL_GetError());
             return 0;
         }
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+#if defined(__ANDROID__)
+        nv2a_gl_is_es = 1;
+#else
+        {
+            const char *e = getenv("RECOMP_GLES");      /* try the ES path on a desktop */
+            nv2a_gl_is_es = e && *e && *e != '0';
+        }
+#endif
+        if (nv2a_gl_is_es) {
+            nv2a_shader_es = 1;
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+            SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+            SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+            SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+            SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
+            SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+        } else {
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        }
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         s_win = SDL_CreateWindow("NV2A", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+                                 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
+#if defined(__ANDROID__)
+                                 | SDL_WINDOW_FULLSCREEN
+#endif
+                                 );
         if (!s_win) {
             fprintf(stderr, "  [GL] window: %s\n", SDL_GetError());
             return 0;
         }
-        s_ctx = SDL_GL_CreateContext(s_win);
+        if (nv2a_gl_is_es) {
+            /* ES 3.2 first (GL_CLAMP_TO_BORDER), then 3.0. */
+            static const int minors[] = { 2, 1, 0 };
+            size_t k;
+            for (k = 0; k < sizeof minors / sizeof minors[0] && !s_ctx; k++) {
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+                SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, minors[k]);
+                s_ctx = SDL_GL_CreateContext(s_win);
+            }
+        } else {
+            s_ctx = SDL_GL_CreateContext(s_win);
+        }
         if (!s_ctx) {
             fprintf(stderr, "  [GL] context: %s\n", SDL_GetError());
             return 0;
@@ -1102,6 +1165,14 @@ static int ready(void)
     SDL_GL_SetSwapInterval(0);
     if (nv2a_gl_load(SDL_GL_GetProcAddress) != 0)
         return 0;
+    if (nv2a_gl_is_es) {
+        GLint maj = 0, min = 0;
+        glGetIntegerv(0x821B, &maj);                /* GL_MAJOR_VERSION */
+        glGetIntegerv(0x821C, &min);                /* GL_MINOR_VERSION */
+        s_es_border = maj > 3 || (maj == 3 && min >= 2);
+        fprintf(stderr, "  [GL] OpenGL ES %d.%d (GL_CLAMP_TO_BORDER %s)\n", maj, min,
+                s_es_border ? "yes" : "no, edge instead");
+    }
     fprintf(stderr, "  [GL] %s / %s / %s\n", (const char *)glGetString(GL_VENDOR),
             (const char *)glGetString(GL_RENDERER), (const char *)glGetString(GL_VERSION));
     {
@@ -1298,7 +1369,8 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
      * depth. GL clips there, so a screen quad placed at the far plane
      * (NFSU2's loading screen, z = 1.0 through its vertex program) vanished
      * whenever rounding put it a hair beyond. */
-    glEnable(0x864F);                               /* GL_DEPTH_CLAMP */
+    if (!nv2a_gl_is_es)
+        glEnable(0x864F);                           /* GL_DEPTH_CLAMP */
 }
 
 static void psh_key(const uint32_t *r, Nv2aPshKey *k)
@@ -1557,7 +1629,8 @@ static int upload_vertices(const Nv2aRawBatch *b)
         off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
         size = (GLint)b->direct[a].size;
         switch (b->direct[a].type) {
-        case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        case 0:  size = nv2a_gl_is_es ? 4 : (GLint)GL_BGRA;   /* ES: swapped in the shader */
+                 type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
         case 1:  type = GL_SHORT; norm = GL_TRUE; break;
         case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
         case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -1700,6 +1773,14 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         argb_vec4(r[0x1E24 / 4], u.fc[1]);
         u.aref = (float)(r[0x340 / 4] & 0xFF);
         u.xform = b->xform == 1 ? 1 : 0;
+        if (nv2a_gl_is_es) {
+            /* D3DCOLOR attributes the ES vertex shader must swap (see
+             * glVertexAttribPointer in the vertex setup). */
+            for (a = 0; a < NV2A_RAW_ATTRS && a < 16; a++)
+                if ((b->attr_present & (1u << a)) && (b->attr_direct & (1u << a))
+                    && b->direct[a].type == 0)
+                    u.bgra |= 1 << a;
+        }
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
             p->uni = u;
@@ -1709,6 +1790,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             if (p->u_m >= 0) glUniform4fv(p->u_m, 4, u.m);
             if (p->u_vpoff >= 0) glUniform4fv(p->u_vpoff, 1, u.vpoff);
             if (p->u_xform >= 0) glUniform1i(p->u_xform, u.xform);
+            if (p->u_bgra >= 0) glUniform1i(p->u_bgra, u.bgra);
             if (p->u_tscale >= 0) glUniform2fv(p->u_tscale, 4, &u.tscale[0][0]);
             if (p->u_c0 >= 0) glUniform4fv(p->u_c0, 8, &u.c0[0][0]);
             if (p->u_c1 >= 0) glUniform4fv(p->u_c1, 8, &u.c1[0][0]);
@@ -1986,6 +2068,9 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
     fclose(f);
 }
 
+#if defined(__ANDROID__)
+extern volatile unsigned nfsu2_frames;         /* android_host.c: FPS overlay */
+#endif
 /* The host's per-frame hook (switch_saltynx.c: the frame rate for SaltyNX
  * overlays), with the rendered picture's size. Weak and undefined
  * elsewhere: the call is skipped. */
@@ -1993,6 +2078,9 @@ extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribu
 
 static void gl_flip(void)
 {
+#if defined(__ANDROID__)
+    nfsu2_frames++;
+#endif
     state_dirty();
     static int dump_every = -1;
     static char dump_prefix[256];
@@ -2092,8 +2180,14 @@ static void gl_flip(void)
             char path[320];
             glBindFramebuffer(GL_READ_FRAMEBUFFER, s->fbo);
             glPixelStorei(GL_PACK_ALIGNMENT, 4);
-            glReadPixels(0, 0, (GLsizei)s->pw, (GLsizei)s->ph, GL_BGRA,
+            glReadPixels(0, 0, (GLsizei)s->pw, (GLsizei)s->ph, NV2A_FMT_BGRA,
                          GL_UNSIGNED_BYTE, pix);
+            if (nv2a_gl_is_es) {                /* RGBA -> the BGRA dump_bmp expects */
+                size_t q;
+                for (q = 0; q + 3 < need; q += 4) {
+                    uint8_t t = pix[q]; pix[q] = pix[q + 2]; pix[q + 2] = t;
+                }
+            }
             snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
             dump_bmp(path, pix, s->pw, s->ph);
         }
@@ -2133,6 +2227,12 @@ static void gl_flip(void)
     }
 swap:
     gl_step_done("present");
+#if defined(__ANDROID__)
+    /* SDL's activity handling makes the context current on its own thread
+     * when the app comes back to the foreground; take it back. */
+    if (SDL_GL_GetCurrentContext() != s_ctx)
+        SDL_GL_MakeCurrent(s_win, s_ctx);
+#endif
     SDL_GL_SwapWindow(s_win);
     if (nv2a_host_frame_presented)
         nv2a_host_frame_presented(s && s_drew_any ? s->pw : 0, s && s_drew_any ? s->ph : 0);

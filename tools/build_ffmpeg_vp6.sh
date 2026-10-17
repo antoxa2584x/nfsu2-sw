@@ -3,13 +3,14 @@
 # libavcodec + libavutil with only the vp6 decoder. LGPL 2.1 -- no GPL parts
 # (devkitPro's switch-ffmpeg is built with --enable-gpl; don't link that).
 #
-#   tools/build_ffmpeg_vp6.sh switch|linux
+#   tools/build_ffmpeg_vp6.sh switch|linux|android
 #
 # Environment:
 #   FFMPEG_SRC   FFmpeg source (default /root/nfsu2x/ref/ffmpeg-7.1,
 #                git clone -b release/7.1 https://github.com/FFmpeg/FFmpeg.git)
 #   PREFIX       install prefix (default /root/nfsu2x/ffmpeg-vp6-<target>)
 #   DEVKITPRO    default /opt/devkitpro
+#   ANDROID_NDK_HOME  (android) NDK root; ANDROID_API default 29
 set -euo pipefail
 
 TARGET="${1:-switch}"
@@ -39,8 +40,19 @@ switch)
 linux)
     "$SRC/configure" "${COMMON[@]}" --disable-x86asm >configure.log
     ;;
+android)
+    NDK="${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME}"
+    API="${ANDROID_API:-29}"
+    TC="$NDK/toolchains/llvm/prebuilt/$(uname -s | tr A-Z a-z)-x86_64"
+    "$SRC/configure" "${COMMON[@]}" --enable-cross-compile --target-os=android \
+        --arch=aarch64 --cpu=armv8-a --enable-neon \
+        --cc="$TC/bin/aarch64-linux-android$API-clang" \
+        --cross-prefix="$TC/bin/llvm-" --ar="$TC/bin/llvm-ar" --nm="$TC/bin/llvm-nm" \
+        --ranlib="$TC/bin/llvm-ranlib" --strip="$TC/bin/llvm-strip" \
+        --extra-cflags="-O2 -fPIC" >configure.log
+    ;;
 *)
-    echo "usage: $0 switch|linux" >&2; exit 1 ;;
+    echo "usage: $0 switch|linux|android" >&2; exit 1 ;;
 esac
 grep -E '^License' configure.log
 make -j"$(nproc)" >make.log

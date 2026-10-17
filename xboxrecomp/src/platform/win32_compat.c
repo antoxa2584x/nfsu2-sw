@@ -41,6 +41,9 @@
 #else
 #include <sys/mman.h>
 #endif
+#if defined(__ANDROID__)
+#include <sys/syscall.h>   /* memfd_create is a raw syscall below API 30 */
+#endif
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #include <sys/stat.h>
@@ -887,7 +890,12 @@ void xbox_guest_pin(int interrupt)
         cpu_set_t set;
         CPU_ZERO(&set);
         CPU_SET(core, &set);
+#if defined(__ANDROID__)
+        /* bionic has no pthread_setaffinity_np; pid 0 = this thread. */
+        sched_setaffinity(0, sizeof set, &set);
+#else
         pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+#endif
         (void)interrupt;
     }
 #endif
@@ -1157,11 +1165,36 @@ DWORD SuspendThread(HANDLE h)
     return prev;
 }
 
+#if defined(__ANDROID__)
+static void android_exit_handler(int sig)
+{
+    (void)sig;
+    pthread_exit(NULL);
+}
+
+static void android_install_exit_signal(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = android_exit_handler;
+    sigaction(SIGUSR2, &sa, NULL);
+}
+#endif
+
 BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = obj_from(h);
     if (!o || o->kind != K_THREAD) return FALSE;
+#if defined(__ANDROID__)
+    /* bionic has no pthread_cancel: ask the thread to exit with a signal. */
+    {
+        static pthread_once_t once = PTHREAD_ONCE_INIT;
+        pthread_once(&once, android_install_exit_signal);
+        pthread_kill(o->thread, SIGUSR2);
+    }
+#else
     pthread_cancel(o->thread);
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1756,6 +1789,30 @@ static int prot_from_page(DWORD protect)
  * alone -- UnmapViewOfFile takes no length and VirtualFree(MEM_RELEASE) is
  * documented to take size 0 -- so the length has to be recoverable here or
  * munmap cannot be called at all. */
+/* One address range the guest owns outright. The Xbox model puts RAM mirrors and
+ * hardware windows at fixed offsets from the host base, all the way up to
+ * guest 0xFFFFFFFF. Hoping those 4 GB are free after the fact fails on Android
+ * (the kernel places the base just under other mappings), so the whole range is
+ * reserved up front and fixed-address requests inside it replace our own
+ * placeholder instead of being refused. */
+static uintptr_t g_guest_res_lo, g_guest_res_hi;
+
+void *w32_reserve_guest_space(size_t size)
+{
+    void *p = mmap(NULL, size, PROT_NONE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) return NULL;
+    g_guest_res_lo = (uintptr_t)p;
+    g_guest_res_hi = (uintptr_t)p + size;
+    return p;
+}
+
+static int in_guest_res(const void *addr, size_t len)
+{
+    uintptr_t a = (uintptr_t)addr;
+    return g_guest_res_hi && a >= g_guest_res_lo && a + len <= g_guest_res_hi;
+}
+
 #if defined(__APPLE__)
 /* Darwin has no MAP_FIXED_NOREPLACE, and the two mmap options are both wrong
  * for VirtualAlloc: MAP_FIXED silently unmaps whatever already occupies the
@@ -1817,7 +1874,7 @@ LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD pro
     }
 
 #if defined(MAP_FIXED_NOREPLACE)
-    if (address) flags |= MAP_FIXED_NOREPLACE;
+    if (address) flags |= in_guest_res(address, size) ? MAP_FIXED : MAP_FIXED_NOREPLACE;
 #endif
 
     void *p;
@@ -1992,6 +2049,10 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    /* bionic's explicit_bzero is not visible under -std=gnu11 here */
+    volatile unsigned char *p = (volatile unsigned char *)ptr;
+    while (cnt--) *p++ = 0;
 #else
     explicit_bzero(ptr, cnt);
 #endif
@@ -2411,7 +2472,12 @@ static int anon_map_fd(const char *name)
     if (fd >= 0) shm_unlink(shm_name);
     return fd;
 #else
+#if defined(__ANDROID__)
+    /* <sys/mman.h> declares memfd_create from API 30 only. */
+    return (int)syscall(__NR_memfd_create, name ? name : "xbox_map", 0);
+#else
     return memfd_create(name ? name : "xbox_map", 0);
+#endif
 #endif
 }
 
@@ -2462,7 +2528,7 @@ LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow
      * and dying somewhere unrelated a moment later. */
     if (baseAddr) {
 #if defined(MAP_FIXED_NOREPLACE)
-        flags |= MAP_FIXED_NOREPLACE;
+        flags |= in_guest_res(baseAddr, len) ? MAP_FIXED : MAP_FIXED_NOREPLACE;
 #elif defined(__APPLE__)
         /* Darwin has no MAP_FIXED_NOREPLACE. Claim the range first with
          * mach_vm_map(VM_FLAGS_FIXED), which refuses rather than displaces;

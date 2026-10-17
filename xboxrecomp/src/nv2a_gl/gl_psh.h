@@ -19,6 +19,7 @@ typedef struct {
 
 /* Nonzero: emit Vulkan GLSL (nv2a_vk) instead of GLSL 3.30 (gl_vsh.c). */
 extern int nv2a_shader_vk;
+extern int nv2a_shader_es;   /* GLSL ES 3.00, see gl_vsh.h */
 
 /* Fragment shader source for `k`. Returns bytes written, -1 on overflow. */
 int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap);

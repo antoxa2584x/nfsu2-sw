@@ -1,0 +1,145 @@
+# Builds the Android APK from your own default.xbe.
+#
+# The disc data never lives on this branch. In a PRIVATE repo, put default.xbe
+# in the root of a branch called `private-assets`; this workflow reads it from
+# there, lifts the C (tools/regen.sh), builds the APK with the NDK and uploads it.
+# Without that branch (e.g. the public repo) the job does nothing.
+name: android
+
+on:
+  push:
+    branches: [android-port]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      NFSU2_XBE: ${{ github.workspace }}/default.xbe
+      NFSU2_GEN_DIR: ${{ github.workspace }}/gen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Look for default.xbe (branch private-assets)
+        id: xbe
+        run: |
+          if git rev-parse --verify -q origin/private-assets >/dev/null \
+             && git cat-file -e origin/private-assets:default.xbe 2>/dev/null; then
+            git show origin/private-assets:default.xbe > default.xbe
+            test "$(head -c4 default.xbe)" = "XBEH"
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "No private-assets:default.xbe here, nothing to build."
+          fi
+
+      - name: Free disk space
+        if: steps.xbe.outputs.have == 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: actions/setup-python@v5
+        if: steps.xbe.outputs.have == 'true'
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-java@v4
+        if: steps.xbe.outputs.have == 'true'
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Lift the C (tools/regen.sh)
+        if: steps.xbe.outputs.have == 'true'
+        shell: bash
+        run: |
+          pip install capstone
+          bash tools/regen.sh 2>&1 | tee regen.log | tail -n 200
+          du -sh "$NFSU2_GEN_DIR"; ls "$NFSU2_GEN_DIR" | wc -l
+
+      - name: SDL2 sources
+        if: steps.xbe.outputs.have == 'true'
+        run: bash android/tools/fetch_deps.sh
+
+      - name: FFmpeg VP6 (movies; optional)
+        if: steps.xbe.outputs.have == 'true'
+        continue-on-error: true
+        env:
+          FFMPEG_SRC: ${{ github.workspace }}/ffmpeg-src
+          PREFIX: ${{ github.workspace }}/ffmpeg-vp6-android
+        shell: bash
+        run: |
+          # Force NDK 27 to match the main build
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.3.13750724"
+          test -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" || { echo "no NDK at $ANDROID_NDK_HOME"; ls "$ANDROID_SDK_ROOT/ndk" || true; exit 1; }
+          git clone --depth 1 --branch n7.1 https://github.com/FFmpeg/FFmpeg "$FFMPEG_SRC"
+          bash tools/build_ffmpeg_vp6.sh android 2>&1 | tee ffmpeg.log | tail -n 40
+          ls "$PREFIX/lib"
+
+
+      - name: glslang (Vulkan shader compiler)
+        if: steps.xbe.outputs.have == 'true'
+        shell: bash
+        run: |
+          # Force NDK 27 to match the main build (libc++ must match)
+          # Runner has 27.3.13750724, not 27.0.12077973
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.3.13750724"
+          test -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt" || { echo "no NDK at $ANDROID_NDK_HOME"; ls "$ANDROID_SDK_ROOT/ndk" || true; exit 1; }
+          bash android/tools/build_glslang.sh 2>&1 | tee glslang.log | tail -n 40
+          ls android/deps/glslang-android/lib
+          # Verify glslang CMake config exists
+          test -f android/deps/glslang-android/lib/cmake/glslang/glslang-config.cmake && echo "glslang CMake config found" || (echo "ERROR: glslang CMake config NOT found"; exit 1)
+
+      - name: Build APK
+        if: steps.xbe.outputs.have == 'true'
+        working-directory: android
+        shell: bash
+        run: |
+          FF=""
+          [ -d "$GITHUB_WORKSPACE/ffmpeg-vp6-android" ] && FF="-Pnfsu2.ffmpegDir=$GITHUB_WORKSPACE/ffmpeg-vp6-android"
+          set -o pipefail
+          bash ./gradlew --no-daemon --stacktrace assembleRelease \
+            -Pnfsu2.genDir="$NFSU2_GEN_DIR" $FF 2>&1 | tee ../build.log | tail -n 300
+
+      - name: Upload APK
+        if: steps.xbe.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nfsu2-android-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload build log
+        if: always() && steps.xbe.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            build.log
+            glslang.log
+            ffmpeg.log
+            regen.log
+          retention-days: 7
+
+      - name: Publish log tails to branch ci-logs
+        if: always() && steps.xbe.outputs.have == 'true'
+        shell: bash
+        run: |
+          mkdir -p /tmp/logs
+          for f in regen.log build.log ffmpeg.log glslang.log; do [ -f "$f" ] && tail -n 4000 "$f" > "/tmp/logs/$f"; done
+          echo "run ${{ github.run_id }}" > /tmp/logs/RUN.txt
+          cd /tmp/logs && git init -q -b ci-logs && git add . \
+            && git -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -m "logs run ${{ github.run_id }}" \
+            && git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" ci-logs
