@@ -2320,6 +2320,11 @@ static int ready(void)
         const char *drv = getenv("SDL_VIDEODRIVER");
         s_headless = (e && *e == '1') || (drv && !strcmp(drv, "offscreen"));
         if (!s_headless) {
+            /* SDL2 turns text input on when video starts, and under Steam
+             * (Steam Deck Game Mode) that opens the on-screen keyboard at
+             * every launch. The title never types: no screen keyboard, and
+             * text input off once the window exists. */
+            SDL_SetHint(SDL_HINT_ENABLE_SCREEN_KEYBOARD, "0");
             if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
                 s_headless = 1;
             } else {
@@ -2334,6 +2339,8 @@ static int ready(void)
                 s_win = SDL_CreateWindow(title && *title ? title : "NV2A (Vulkan)",
                                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                          1280, 720, wf);
+                if (s_win)
+                    SDL_StopTextInput();
                 if (s_win && (wf & SDL_WINDOW_FULLSCREEN_DESKTOP))
                     SDL_ShowCursor(SDL_DISABLE);
                 /* RECOMP_WINDOW_ICON: a .bmp for the taskbar/title bar. */

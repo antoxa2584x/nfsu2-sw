@@ -533,7 +533,9 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   duration -- a held rumble used to stop after 1 s).
 - nv2a_vk (non-Switch): RECOMP_WINDOW_TITLE, RECOMP_FULLSCREEN=1, F11 /
   Alt+Enter toggle, SDL_QUIT (window close, SIGTERM from Steam) exits;
-  present mode MAILBOX before IMMEDIATE (no tearing on desktops).
+  present mode MAILBOX before IMMEDIATE (no tearing on desktops). SDL2
+  starts text input with video, which opened Steam's on-screen keyboard at
+  every Deck launch: SDL_HINT_ENABLE_SCREEN_KEYBOARD=0 + SDL_StopTextInput.
 - Steam library art: assets/steam_capsule.png (600x900) and
   steam_wide.png (920x430), steam_hero.png (1920x620) from SteamGridDB
   (user's picks; deck/make_art.sh -> art/). nfsu2x-steam-art.py copies
