@@ -43,5 +43,11 @@ if [ -f "$HERE/nfsu2x-install.sh" ] && ! grep -qF "Path=$HERE" "$ENTRY" 2>/dev/n
     sh "$HERE/nfsu2x-install.sh" --quiet
 fi
 
+# Started by Steam: give its shortcut the library artwork (art/, kept if
+# already there; shown after Steam's next start).
+if [ -n "${SteamGameId:-}" ] && [ -f "$HERE/nfsu2x-steam-art.py" ] && command -v python3 >/dev/null; then
+    python3 "$HERE/nfsu2x-steam-art.py" --quiet
+fi
+
 [ -f nfsu2x_log.txt ] && mv -f nfsu2x_log.txt nfsu2x_log.prev.txt
 exec "$HERE/nfsu2_recomp" "$@" >nfsu2x_log.txt 2>&1

@@ -9,3 +9,6 @@
 # NFSU2_DECK_TEXT=0          keep "Black" in the replay legend (RB on the Deck)
 # NFSU2_CLOCK_LOG=0          no [clock] lines in nfsu2x_log.txt
 # RECOMP_AUDIO_VOLUME=80     0..100
+# NFSU2_DRAW_DISTANCE=1.6    traffic radius and scenery detail (1..4; 1 = Xbox)
+# NFSU2_CAR_DETAIL=4         car models keep detail N times further (1..16)
+# RECOMP_PRESENT_FILL=0      16:9 with bars instead of filling the height

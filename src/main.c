@@ -377,18 +377,28 @@ static int game_main(void)
     /* Draw distance (recomp_manual.c): traffic, car and scenery detail k
      * times further. NFSU2_DRAW_DISTANCE=<k> (1..4); default 1.6 on a Steam
      * Deck, 1 (the Xbox's) elsewhere. */
+    /* Car detail: each car model level kept NFSU2_CAR_DETAIL times further
+     * (1..16); default 4 on a Steam Deck, else the draw distance factor. */
     {
         extern void nfsu2_draw_distance_init(float k);
+        extern void nfsu2_car_detail_init(float k);
         const char *e = getenv("NFSU2_DRAW_DISTANCE");
-        float k = 1.0f;
+        const char *c = getenv("NFSU2_CAR_DETAIL");
+        float k = 1.0f, ck;
+        int deck = 0;
 #if !defined(_WIN32) && !defined(__SWITCH__)
         extern int nfsu2_is_steam_deck(void);
-        if (nfsu2_is_steam_deck())
+        deck = nfsu2_is_steam_deck();
+        if (deck)
             k = 1.6f;
 #endif
         if (e && *e)
             k = (float)atof(e);
+        ck = deck ? 4.0f : k;
+        if (c && *c)
+            ck = (float)atof(c);
         nfsu2_draw_distance_init(k);
+        nfsu2_car_detail_init(ck);
     }
 
     /* The emulated APU. DirectSound's accesses reach it through the MMIO

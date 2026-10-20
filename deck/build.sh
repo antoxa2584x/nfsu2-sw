@@ -99,6 +99,9 @@ mkdir -p "$OUT/nfsu2x/game"
 objcopy --strip-debug "$BIN" "$OUT/nfsu2x/nfsu2_recomp"
 install -m 755 "$REPO/deck/nfsu2x.sh" "$OUT/nfsu2x/nfsu2x.sh"
 install -m 755 "$REPO/deck/nfsu2x-install.sh" "$OUT/nfsu2x/nfsu2x-install.sh"
+install -m 755 "$REPO/deck/nfsu2x-steam-art.py" "$OUT/nfsu2x/nfsu2x-steam-art.py"
+# Steam library artwork (vertical, horizontal, hero, logo, icon).
+bash "$REPO/deck/make_art.sh" "$OUT/nfsu2x/art"
 # The icon Steam shows (through nfsu2x-install.sh's .desktop entry).
 # nfsu2x.bmp is the window's own icon (SDL_LoadBMP: no PNG in SDL2).
 if command -v convert >/dev/null; then

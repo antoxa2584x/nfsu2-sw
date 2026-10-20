@@ -534,6 +534,14 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
 - nv2a_vk (non-Switch): RECOMP_WINDOW_TITLE, RECOMP_FULLSCREEN=1, F11 /
   Alt+Enter toggle, SDL_QUIT (window close, SIGTERM from Steam) exits;
   present mode MAILBOX before IMMEDIATE (no tearing on desktops).
+- Steam library art: assets/steam_capsule.png (600x900) and
+  steam_wide.png (920x430), steam_hero.png (1920x620) from SteamGridDB
+  (user's picks; deck/make_art.sh -> art/). nfsu2x-steam-art.py copies
+  them to userdata/<u>/config/grid/<id>{p,,_hero,_logo,_icon}.png; id from
+  SteamGameId >> 32 (launcher, when started by Steam) or shortcuts.vdf
+  (binary KeyValues: appid field, else crc32(exe+name)|0x80000000) for
+  shortcuts pointing into the folder or named "Need for Speed Underground
+  2". Never overwrites (--force does). Shown after Steam restarts.
 - **AMD noise (issue #45):** with RADV's DCC many textures were coloured
   noise (1.5x; reporter: RADV_DEBUG=nodcc fixes it). nv2a_vk adds nodcc to
   RADV_DEBUG before vkCreateInstance (RECOMP_VK_DCC=1 keeps DCC). Suspect:
@@ -548,8 +556,11 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   traffic spawn/keep route distance 250, 0x34036C spawn search 500 (x k);
   0x3408F8 250 recycle test raised only inside wrappers of sub_00019240/
   sub_00019280 (shared with sub_0007D910/sub_0017C980 arithmetic); car LOD
-  pixel steps 0x35EBB4/B8/BC 80/40/20 (/ k, sub_00204D60); scenery size
-  from sub_001C6900 (native) x k -> sub_001C69C0's 17 px cull and LOD.
+  pixel steps 0x35EBB4/B8/BC 80/40/20 (sub_00204D60) divided by their own
+  NFSU2_CAR_DETAIL (Deck 4 -> 20/10/5 px; level = first T[i] the size
+  reaches, starting at the car's minimum [car+0x34], traffic probably 1);
+  scenery size from sub_001C6900 (native) x k -> sub_001C69C0's 17 px cull
+  and LOD.
   World sections come from a visibility grid (0x43C630, no constant); camera
   far plane 10000 (immediate). Reflection far planes 0x39CE0C/10/14 (32/350/
   60, sub_000AEA90) left alone. Car pool fixed: traffic sparser with k.

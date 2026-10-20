@@ -58,4 +58,10 @@ for k in kbuildsycoca6 kbuildsycoca5; do
 done
 command -v update-desktop-database >/dev/null && update-desktop-database "$APPS" 2>/dev/null
 say "Now: Steam -> Add a Non-Steam Game -> Need for Speed Underground 2"
+
+# Library artwork for a shortcut that already exists (run this again after
+# adding it, or just start the game once from Steam).
+if [ "$QUIET" = 0 ] && [ -f "$HERE/nfsu2x-steam-art.py" ] && command -v python3 >/dev/null; then
+    python3 "$HERE/nfsu2x-steam-art.py"
+fi
 exit 0

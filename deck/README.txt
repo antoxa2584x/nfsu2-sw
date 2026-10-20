@@ -17,6 +17,11 @@ Install
    Selected Programs, and play it from Game Mode.
    (Already added nfsu2x.sh by hand? Steam -> its Properties -> click the
    empty icon square -> pick nfsu2x.png.)
+4. Library artwork (vertical and horizontal capsules, banner, logo) is put
+   into Steam the first time you start the game from Steam (or by running
+   nfsu2x-install.sh again after adding it). Restart Steam (or the Deck)
+   to see it. Art you set yourself in Steam is never replaced; to put
+   ours back: python3 nfsu2x-steam-art.py --force.
    Optional: Properties -> Compatibility -> "Steam Linux Runtime 3.0
    (sniper)" runs it inside the runtime it was built for.
 

@@ -943,8 +943,7 @@ void sub_0004B260(void)
  *                  sub_00019280 straight line without a road net). Shared
  *                  with unrelated arithmetic (sub_0007D910, sub_0017C980),
  *                  so it is raised only while those two run (wrappers).
- *   0x35EBB4  80/40/20  car LOD steps in projected pixels (sub_00204D60):
- *                  divided by k, each LOD lasts k times further
+ *   (car detail has its own factor: nfsu2_car_detail_init below)
  *   sub_001C6900   scenery size in pixels for sub_001C69C0's culling (17 px)
  *                  and LOD choice: multiplied by k (native path only, not
  *                  under RECOMP_NATIVE=0 or RECOMP_NATIVE_CHECK=1).
@@ -971,12 +970,29 @@ void nfsu2_draw_distance_init(float k)
     s_draw_k = k;
     patch_float(0x38D060, 250.0f, 250.0f * k);
     patch_float(0x34036C, 500.0f, 500.0f * k);
+    printf("[draw] distance x%.2f: traffic %.0f m (spawn search %.0f m), scenery x%.2f\n",
+           k, MEMF(0x38D060), MEMF(0x34036C), k);
+}
+
+/* Car detail (NFSU2_CAR_DETAIL=k, Steam Deck default 4): sub_00204D60 picks
+ * a car's model by its projected size in title pixels, view[+0xC] * 3 /
+ * (d - 3). From the car's lowest allowed level ([car+0x34]; traffic seems
+ * to start at 1, its level-0 model is not there to draw) it steps down
+ * while the size is under T[level], T = 80, 40, 20 px, then 0 (0x35EBB4..
+ * C0). The steps divided by k keep every level k times further away; the
+ * per-car minimum is left alone. More polygons, the same draws. */
+void nfsu2_car_detail_init(float k)
+{
+    if (!(k > 1.0f) || k > 16.0f) {
+        if (k != 1.0f)
+            fprintf(stderr, "[draw] NFSU2_CAR_DETAIL %g ignored (1..16)\n", k);
+        return;
+    }
     patch_float(0x35EBB4, 80.0f, 80.0f / k);
     patch_float(0x35EBB8, 40.0f, 40.0f / k);
     patch_float(0x35EBBC, 20.0f, 20.0f / k);
-    printf("[draw] distance x%.2f: traffic %.0f m (spawn search %.0f m), car LOD steps "
-           "%.1f/%.1f/%.1f px, scenery x%.2f\n", k, MEMF(0x38D060), MEMF(0x34036C),
-           MEMF(0x35EBB4), MEMF(0x35EBB8), MEMF(0x35EBBC), k);
+    printf("[draw] car detail x%.2f: model steps %.1f/%.1f/%.1f px\n", k,
+           MEMF(0x35EBB4), MEMF(0x35EBB8), MEMF(0x35EBBC));
 }
 
 extern void sub_00019240_gen(void);
