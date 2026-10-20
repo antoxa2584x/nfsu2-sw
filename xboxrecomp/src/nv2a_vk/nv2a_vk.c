@@ -41,6 +41,10 @@
  *   RECOMP_VK_FXAA=0                 present with a plain blit, no FXAA
  *   RECOMP_VK_VALIDATION=1           (Linux) enable the Khronos validation layer
  *   RECOMP_VK_HEADLESS=1             (Linux) no window, no present
+ *   RECOMP_PRESENT_FILL=1            fill the screen's height, sides cut (16:9
+ *                                    on 16:10; never past 4:3)
+ *   RECOMP_VK_DCC=1                  (Linux) keep AMD colour compression
+ *                                    (default: RADV_DEBUG=nodcc, issue #45)
  */
 #include "nv2a_vk.h"
 #include "../nv2a_gl/gl_psh.h"
@@ -2205,11 +2209,19 @@ static int create_swapchain(void)
             break;
         }
     /* The game paces itself (vblank emulation): presenting must not block
-     * it. Horizon's immediate mode does not tear (nvnflinger composes). */
+     * it. Horizon's immediate mode does not tear (nvnflinger composes);
+     * elsewhere (a Steam Deck's desktop, any X11/Wayland screen) it does,
+     * so mailbox comes first there and immediate only without it. */
+#if defined(__SWITCH__)
     for (i = 0; i < nm; i++)
         if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) mode = modes[i];
+#endif
     for (i = 0; i < nm && mode == VK_PRESENT_MODE_FIFO_KHR; i++)
         if (modes[i] == VK_PRESENT_MODE_MAILBOX_KHR) mode = modes[i];
+#if !defined(__SWITCH__)
+    for (i = 0; i < nm && mode == VK_PRESENT_MODE_FIFO_KHR; i++)
+        if (modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) mode = modes[i];
+#endif
     s_sc_extent = caps.currentExtent;
     if (s_sc_extent.width == 0xFFFFFFFFu) {
         s_sc_extent.width = 1280;
@@ -2311,8 +2323,28 @@ static int ready(void)
             if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
                 s_headless = 1;
             } else {
-                s_win = SDL_CreateWindow("NV2A (Vulkan)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                         1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+                /* RECOMP_WINDOW_TITLE names the window; RECOMP_FULLSCREEN=1
+                 * starts fullscreen (the title's default on a Steam Deck).
+                 * F11 / Alt+Enter toggle it (vk_flip). */
+                const char *title = getenv("RECOMP_WINDOW_TITLE");
+                const char *fs = getenv("RECOMP_FULLSCREEN");
+                Uint32 wf = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+                if (fs && *fs == '1')
+                    wf |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+                s_win = SDL_CreateWindow(title && *title ? title : "NV2A (Vulkan)",
+                                         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                         1280, 720, wf);
+                if (s_win && (wf & SDL_WINDOW_FULLSCREEN_DESKTOP))
+                    SDL_ShowCursor(SDL_DISABLE);
+                /* RECOMP_WINDOW_ICON: a .bmp for the taskbar/title bar. */
+                {
+                    const char *ip = getenv("RECOMP_WINDOW_ICON");
+                    SDL_Surface *icon = s_win && ip && *ip ? SDL_LoadBMP(ip) : NULL;
+                    if (icon) {
+                        SDL_SetWindowIcon(s_win, icon);
+                        SDL_FreeSurface(icon);
+                    }
+                }
                 if (!s_win) {
                     s_headless = 1;
                 } else {
@@ -2334,6 +2366,21 @@ static int ready(void)
         const char *v = getenv("RECOMP_VK_VALIDATION");
         if (v && *v == '1')
             layers[nlayers++] = "VK_LAYER_KHRONOS_validation";
+    }
+    /* AMD (RADV, Steam Deck included): with delta colour compression many
+     * textures came out as coloured noise (issue #45; RADV_DEBUG=nodcc
+     * fixed it, validation clean). Draws may sample the surface they render
+     * into, which DCC does not survive. RADV reads RADV_DEBUG when the
+     * instance is created: nodcc is added unless RECOMP_VK_DCC=1. Other
+     * drivers ignore the variable. */
+    {
+        const char *dcc = getenv("RECOMP_VK_DCC");
+        const char *rd = getenv("RADV_DEBUG");
+        if (!(dcc && *dcc == '1') && !(rd && strstr(rd, "nodcc"))) {
+            char buf[256];
+            snprintf(buf, sizeof buf, "%s%snodcc", rd ? rd : "", rd && *rd ? "," : "");
+            setenv("RADV_DEBUG", buf, 1);
+        }
     }
 #endif
     ai.pApplicationName = "nfsu2x";
@@ -3215,6 +3262,7 @@ static struct {
 } s_pend;
 static int s_inst_on = -1, s_inst_alt;
 static uint32_t s_st_draws, s_st_calls, s_st_inst;
+static uint32_t s_st_self;      /* draws sampling their own render target */
 
 static void pend_flush(void)
 {
@@ -3396,6 +3444,11 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
     /* Textures first: uploads end the rendering pass. */
     for (i = 0; i < 4; i++)
         bind_stage(r, (int)i, tscale[i], &img[i], &sampled[i]);
+    for (i = 0; i < 4; i++)
+        if (sampled[i] == s) {
+            s_st_self++;
+            break;
+        }
     for (i = 0; i < 4; i++)
         if (sampled[i] && sampled[i]->dirty && sampled[i] != s) {
             end_rendering();                 /* next begin_rendering barriers */
@@ -3799,6 +3852,17 @@ static int fxaa_on(void)
     return s_fxaa && nv2a_vk_fxaa;
 }
 
+/* RECOMP_PRESENT_FILL=1: fill the screen's height, cutting the sides (vk_flip). */
+static int present_fill(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_PRESENT_FILL");
+        on = e && *e == '1';
+    }
+    return on;
+}
+
 static VkPipeline pp_pipe(VkFormat fmt)
 {
     VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
@@ -3909,6 +3973,16 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
     VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
     VkViewport vp = { (float)dx, (float)dy, (float)dw, (float)dh, 0.0f, 1.0f };
     VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
+    /* A picture wider than the target (RECOMP_PRESENT_FILL) keeps its
+     * viewport off the edges; the scissor must stay inside. */
+    if (sc.offset.x < 0) {
+        sc.offset.x = 0;
+        sc.extent.width = ext.width;
+    }
+    if (sc.offset.y < 0) {
+        sc.offset.y = 0;
+        sc.extent.height = ext.height;
+    }
     VkDescriptorImageInfo ii;
     VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     float pc[8];
@@ -4132,11 +4206,13 @@ static void vk_flip(void)
             uint32_t nf = s_frame - st_frame;
             fprintf(stderr, "[vk] per frame: %u draws -> %u draw calls (%u instances appended);"
                     " barriers %u full, %u gfx, %u skipped; uniforms %u reused, %u new;"
-                    " constants %u reused; descriptors %u pushed, %u kept\n",
+                    " constants %u reused; descriptors %u pushed, %u kept;"
+                    " %u draws sampled their own target in %u frames\n",
                     s_st_draws / nf, s_st_calls / nf, s_st_inst / nf,
                     s_st_bar_full / nf, s_st_bar_gfx / nf, s_st_bar_skip / nf,
                     s_st_uhit / nf, s_st_umiss / nf, s_st_chit / nf,
-                    s_st_desc / nf, s_st_desc_saved / nf);
+                    s_st_desc / nf, s_st_desc_saved / nf, s_st_self, nf);
+            s_st_self = 0;
             s_st_draws = s_st_calls = s_st_inst = 0;
             s_st_bar_full = s_st_bar_gfx = s_st_bar_skip = 0;
             s_st_uhit = s_st_umiss = s_st_chit = s_st_desc = s_st_desc_saved = 0;
@@ -4258,6 +4334,16 @@ static void vk_flip(void)
                 if (xbox_video_widescreen() && lw < lh * 1.5f)
                     lw = lh * 16.0f / 9.0f;
                 scale = ww / lw < wh / lh ? ww / lw : wh / lh;
+                /* RECOMP_PRESENT_FILL=1 (Steam Deck default): a screen
+                 * narrower than the picture (16:9 on 16:10) is filled to
+                 * its height and the sides are cut instead of bars above
+                 * and below. Never past 4:3, where the title keeps its HUD. */
+                if (present_fill() && ww / lw < wh / lh) {
+                    float fill = wh / lh;
+                    if (lw * fill > ww * (lw / lh) / (4.0f / 3.0f))
+                        fill = ww * (lw / lh) / (4.0f / 3.0f) / lw;
+                    scale = fill;
+                }
                 dw = (int)(lw * scale); dh = (int)(lh * scale);
                 dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
             }
@@ -4295,6 +4381,15 @@ static void vk_flip(void)
                 bl.dstOffsets[1].x = dx + dw;
                 bl.dstOffsets[1].y = dy + dh;
                 bl.dstOffsets[1].z = 1;
+                /* Wider than the screen (RECOMP_PRESENT_FILL): blit the part
+                 * that shows; blit offsets must stay inside both images. */
+                if (dx < 0) {
+                    int32_t cut = (int32_t)((int64_t)s->pw * -dx / dw);
+                    bl.srcOffsets[0].x = cut;
+                    bl.srcOffsets[1].x = (int32_t)s->pw - cut;
+                    bl.dstOffsets[0].x = 0;
+                    bl.dstOffsets[1].x = (int32_t)s_sc_extent.width;
+                }
                 vkCmdBlitImage(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, dst,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
             }
@@ -4341,7 +4436,21 @@ static void vk_flip(void)
 #if !defined(__SWITCH__)
     if (s_win) {
         SDL_Event e;
-        while (SDL_PollEvent(&e)) { }
+        while (SDL_PollEvent(&e)) {
+            /* Closing the window (or Steam's Exit Game) ends the process;
+             * the title keeps nothing in memory that is not on disk. */
+            if (e.type == SDL_QUIT) {
+                fprintf(stderr, "[vk] window closed, exiting\n");
+                exit(0);
+            }
+            if (e.type == SDL_KEYDOWN && !e.key.repeat
+                    && (e.key.keysym.sym == SDLK_F11
+                        || (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)))) {
+                int full = (SDL_GetWindowFlags(s_win) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+                SDL_SetWindowFullscreen(s_win, full ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                SDL_ShowCursor(full ? SDL_ENABLE : SDL_DISABLE);
+            }
+        }
     }
 #endif
 }

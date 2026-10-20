@@ -11,6 +11,7 @@
  */
 
 #include "xinput_xbox.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -257,25 +258,91 @@ static SDL_GameController *g_pads[XBOX_MAX_CONTROLLERS];
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS];
 static DWORD g_packet[XBOX_MAX_CONTROLLERS];
 
-/* Open up to XBOX_MAX_CONTROLLERS attached game controllers. */
+#if !defined(__SWITCH__)
+/* Rumble the title asked for, per port. SDL rumble runs for a duration and
+ * usb_gamepad_output only passes changes on, so a held speed is renewed
+ * from the input poll (rumble_refresh) before it runs out. */
+static Uint16 g_rumble_lo[XBOX_MAX_CONTROLLERS], g_rumble_hi[XBOX_MAX_CONTROLLERS];
+static Uint32 g_rumble_at[XBOX_MAX_CONTROLLERS];
+#define RUMBLE_MS     1000u
+#define RUMBLE_RENEW   500u
+#endif
+
+/* Pads come and go (a Steam Deck's Steam Input pad appears when Steam
+ * hands the game its controller config, Bluetooth pads connect late):
+ * slots whose pad went away are closed, and attached controllers not open
+ * yet fill the free slots in SDL's order. Called at init and from the input
+ * poll at most every 500 ms; SDL_NumJoysticks follows the event pump the
+ * renderer runs at each flip. */
 static void open_controllers(void)
 {
-    int slot = 0;
-    for (int i = 0; i < SDL_NumJoysticks() && slot < XBOX_MAX_CONTROLLERS; i++) {
+    SDL_JoystickID open_ids[XBOX_MAX_CONTROLLERS];
+    int slot, i, n;
+
+    for (slot = 0; slot < XBOX_MAX_CONTROLLERS; slot++) {
+        open_ids[slot] = -1;
+        if (g_pads[slot] && !SDL_GameControllerGetAttached(g_pads[slot])) {
+            fprintf(stderr, "[INPUT] pad %d disconnected\n", slot + 1);
+            SDL_GameControllerClose(g_pads[slot]);
+            g_pads[slot] = NULL;
+            g_controller_connected[slot] = FALSE;
+        }
+        if (g_pads[slot])
+            open_ids[slot] = SDL_JoystickInstanceID(
+                SDL_GameControllerGetJoystick(g_pads[slot]));
+    }
+    n = SDL_NumJoysticks();
+    for (i = 0; i < n; i++) {
+        SDL_JoystickID id;
+        int k, taken = 0;
+
         if (!SDL_IsGameController(i))
             continue;
-        if (!g_pads[slot]) {
-            g_pads[slot] = SDL_GameControllerOpen(i);
-            g_controller_connected[slot] = (g_pads[slot] != NULL);
+        id = SDL_JoystickGetDeviceInstanceID(i);
+        for (k = 0; k < XBOX_MAX_CONTROLLERS; k++)
+            if (open_ids[k] == id)
+                taken = 1;
+        if (taken)
+            continue;
+        for (slot = 0; slot < XBOX_MAX_CONTROLLERS && g_pads[slot]; slot++)
+            ;
+        if (slot == XBOX_MAX_CONTROLLERS)
+            break;
+        g_pads[slot] = SDL_GameControllerOpen(i);
+        g_controller_connected[slot] = (g_pads[slot] != NULL);
+        if (g_pads[slot]) {
+            open_ids[slot] = id;
+            fprintf(stderr, "[INPUT] pad %d: %s%s\n", slot + 1,
+                    SDL_GameControllerName(g_pads[slot]) ?
+                        SDL_GameControllerName(g_pads[slot]) : "(unnamed)",
+                    SDL_GameControllerHasRumble(g_pads[slot]) ? ", rumble" : "");
         }
-        slot++;
     }
 }
 
+#if !defined(__SWITCH__)
+static void rescan_controllers(void)
+{
+    static Uint32 last;
+    Uint32 now = SDL_GetTicks();
+    if (now - last < 500u)
+        return;
+    last = now;
+    open_controllers();
+}
+#endif
+
 void xbox_InputInit(void)
 {
-    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER))
-        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+    /* Pad state is read whether or not the window has the focus: gamescope
+     * (Steam Deck Game Mode) and window managers do not always give it, and
+     * SDL2 otherwise drops every button and axis event while unfocused.
+     * Steam Input already holds input back while its overlay is open. */
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER)
+            && SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+        fprintf(stderr, "[INPUT] SDL game controllers unavailable: %s\n", SDL_GetError());
+    fprintf(stderr, "[INPUT] SDL: %d joystick(s) attached\n", SDL_NumJoysticks());
     open_controllers();
 }
 
@@ -314,7 +381,21 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     }
 #endif
 
+    /* Nothing calls xbox_InputInit on the desktop: the first poll (the USB
+     * pad's report, OHCI thread) starts SDL's controller subsystem. */
+    {
+        static int inited;
+        if (!inited) {
+            inited = 1;
+            xbox_InputInit();
+        }
+    }
+
     SDL_GameController *c = g_pads[dwPort];
+    if (!c || !SDL_GameControllerGetAttached(c)) {
+        rescan_controllers();
+        c = g_pads[dwPort];
+    }
     if (!c || !SDL_GameControllerGetAttached(c)) {
         g_controller_connected[dwPort] = FALSE;
         return ERROR_DEVICE_NOT_CONNECTED;
@@ -322,6 +403,13 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     SDL_GameControllerUpdate();
     g_controller_connected[dwPort] = TRUE;
+
+    /* Renew a held rumble before its duration runs out. */
+    if ((g_rumble_lo[dwPort] || g_rumble_hi[dwPort])
+            && SDL_GetTicks() - g_rumble_at[dwPort] >= RUMBLE_RENEW) {
+        g_rumble_at[dwPort] = SDL_GetTicks();
+        SDL_GameControllerRumble(c, g_rumble_lo[dwPort], g_rumble_hi[dwPort], RUMBLE_MS);
+    }
 
     memset(pState, 0, sizeof(XBOX_INPUT_STATE));
     pState->dwPacketNumber = ++g_packet[dwPort];
@@ -345,9 +433,11 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_X) ? 255 : 0;
     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_Y] =
         SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_Y) ? 255 : 0;
-    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] =
-        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 255 : 0;
+    /* White = LB, Black = RB: the Xbox 360's backward-compatibility layout,
+     * and the Switch build's (L/R). */
     pState->Gamepad.bAnalogButtons[XBOX_BUTTON_WHITE] =
+        SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_LEFTSHOULDER) ? 255 : 0;
+    pState->Gamepad.bAnalogButtons[XBOX_BUTTON_BLACK] =
         SDL_GameControllerGetButton(c, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) ? 255 : 0;
 
     /* SDL trigger axes are 0..32767 -> Xbox analog button 0..255 */
@@ -379,13 +469,15 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
                        pVibration->wRightMotorSpeed);
     return ERROR_SUCCESS;
 #else
+    /* Left = the low-frequency motor, right = the high one, as on XInput.
+     * On a Steam Deck Steam Input plays them on the haptics. The speeds are
+     * kept and renewed by xbox_InputGetState while non-zero. */
+    g_rumble_lo[dwPort] = pVibration->wLeftMotorSpeed;
+    g_rumble_hi[dwPort] = pVibration->wRightMotorSpeed;
+    g_rumble_at[dwPort] = SDL_GetTicks();
     SDL_GameController *c = g_pads[dwPort];
     if (!c) return ERROR_DEVICE_NOT_CONNECTED;
-
-    /* SDL rumble needs a duration; refresh for ~1s on each call (the game
-     * polls vibration continuously). */
-    SDL_GameControllerRumble(c, pVibration->wLeftMotorSpeed,
-                             pVibration->wRightMotorSpeed, 1000);
+    SDL_GameControllerRumble(c, g_rumble_lo[dwPort], g_rumble_hi[dwPort], RUMBLE_MS);
     return ERROR_SUCCESS;
 #endif
 }

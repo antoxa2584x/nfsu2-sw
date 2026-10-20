@@ -493,6 +493,69 @@ The toolkit is vendored in `xboxrecomp/`; the default for `XBOXRECOMP_DIR`.
   stops at its first flip. Test the Vulkan build on hardware.
   `RECOMP_VK_TRACE=<n>` + `NFSU2_LOG_SYNC=1` log each renderer step.
 
+## Steam Deck build (started 2026-10-21)
+
+- `deck/build.sh` (WSL, needs docker): compiles in Valve's Steam Runtime 3
+  SDK image (registry.gitlab.steamos.cloud/steamrt/sniper/sdk, glibc 2.31,
+  gcc-14, glslang 15.1 static) into /root/nfsu2x/build-deck, Vulkan, lifted
+  code -O2, `-march=x86-64-v3 -mtune=znver2 -ffp-contract=off` (no FMA
+  contraction: native rewrites are bit-exact), static libstdc++; FFmpeg
+  VP6 built once into /root/nfsu2x/ffmpeg-vp6-deck. Stages deck_out/nfsu2x
+  (nfsu2_recomp, nfsu2x.sh launcher, nfsu2x_env.txt, README.txt, game/)
+  + nfsu2x-deck-<ver>.tar.gz. Runtime needs only system libSDL2-2.0.so.0
+  (the sniper SDK's is sdl2-compat over SDL3 -- not bundled) and libvulkan.
+- Launcher: cd to its folder, exports nfsu2x_env.txt lines not already set,
+  NFSU2_GAME_DIR=./game, log to nfsu2x_log.txt (previous -> .prev).
+- src/steamdeck.c: Deck = DMI Valve Jupiter (LCD) / Galileo (OLED) or
+  SteamDeck=1; NFSU2_DECK=0/1 overrides. Defaults RECOMP_FULLSCREEN=1,
+  NFSU2_DECK_TEXT=1 (replay "Black" -> "RB"). Clocks are Steam's (QAM
+  Performance writes root-only sysfs; stock already boosts to 3.5 GHz):
+  NFSU2_*_MHZ are ignored with a log line; `[clock]` lines log CPU
+  cur/limit, GPU sclk (manual flag), TDP cap at boot, on every change
+  (2 s poll) and once a minute. NFSU2_CLOCK_LOG=0 off.
+- **No pad on any Linux build (fixed 2026-10-21):** nothing called
+  xbox_InputInit, so SDL's controller subsystem never started (Linux tests
+  used RECOMP_PAD_SCRIPT, which bypasses SDL). The first
+  xbox_InputGetState (OHCI thread) runs it now; log `[INPUT] SDL: n
+  joystick(s) attached`, `[INPUT] pad n: <name>`. Also
+  SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS=1 (unfocused under gamescope).
+- Steam icon: a bare .sh has none. nfsu2x-install.sh writes
+  ~/.local/share/applications/nfsu2x.desktop (name, Icon=nfsu2x.png from
+  assets/icon.jpg); Steam's Add a Non-Steam Game list takes both from it.
+  Also onto ~/Desktop, then kbuildsycoca5/6 (KDE caches its menu). nfsu2x.sh
+  reruns it (--quiet) when the entry is missing or has another Path=. Window
+  icon: RECOMP_WINDOW_ICON=<bmp> (nv2a_vk, SDL_LoadBMP; nfsu2x.bmp), class
+  nfsu2x via SDL_VIDEO_X11/WAYLAND_WMCLASS = the entry's StartupWMClass.
+- SDL input (all Linux): pads hot-plug (rescan every 500 ms while a slot
+  is empty/detached, by joystick instance id), White = LB / Black = RB
+  (360 BC and Switch layout; was swapped), rumble renewed every 500 ms
+  while non-zero (usb_gamepad_output sends only changes; SDL rumble has a
+  duration -- a held rumble used to stop after 1 s).
+- nv2a_vk (non-Switch): RECOMP_WINDOW_TITLE, RECOMP_FULLSCREEN=1, F11 /
+  Alt+Enter toggle, SDL_QUIT (window close, SIGTERM from Steam) exits;
+  present mode MAILBOX before IMMEDIATE (no tearing on desktops).
+- **AMD noise (issue #45):** with RADV's DCC many textures were coloured
+  noise (1.5x; reporter: RADV_DEBUG=nodcc fixes it). nv2a_vk adds nodcc to
+  RADV_DEBUG before vkCreateInstance (RECOMP_VK_DCC=1 keeps DCC). Suspect:
+  draws sampling their own render target (sampled[i] == s, no copy) --
+  counted in RECOMP_DRAW_STATS ("draws sampled their own target"); a copy
+  before such draws would be the real fix. Not verified on AMD.
+- Deck defaults: RECOMP_GL_SCALE=2.5 (until the Video row is changed),
+  RECOMP_PRESENT_FILL=1 (16:9 filled to the 16:10 height, sides cut, never
+  past 4:3; blit crops the source, FXAA viewport off-screen + clamped
+  scissor), NFSU2_DRAW_DISTANCE=1.6.
+- **Draw distance (NFSU2_DRAW_DISTANCE=k, recomp_manual.c):** 0x38D060
+  traffic spawn/keep route distance 250, 0x34036C spawn search 500 (x k);
+  0x3408F8 250 recycle test raised only inside wrappers of sub_00019240/
+  sub_00019280 (shared with sub_0007D910/sub_0017C980 arithmetic); car LOD
+  pixel steps 0x35EBB4/B8/BC 80/40/20 (/ k, sub_00204D60); scenery size
+  from sub_001C6900 (native) x k -> sub_001C69C0's 17 px cull and LOD.
+  World sections come from a visibility grid (0x43C630, no constant); camera
+  far plane 10000 (immediate). Reflection far planes 0x39CE0C/10/14 (32/350/
+  60, sub_000AEA90) left alone. Car pool fixed: traffic sparser with k.
+  Helper scripts: /root/nfsu2x/tdraw/.
+- Not tested on a Deck yet.
+
 ## Audio (host output)
 
 - Linux/Switch output is SDL2 (`SDL_QueueAudio`) behind the `xa2_*` API

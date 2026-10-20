@@ -930,6 +930,74 @@ void sub_0004B260(void)
     esp += 4;
 }
 
+/* ── Draw distance (NFSU2_DRAW_DISTANCE, Steam Deck default 1.6) ──
+ *
+ * k scales how far traffic exists and how far cars and scenery keep their
+ * detail (1 = the Xbox):
+ *   0x38D060  250  traffic: spawn distance ahead along the road, and the
+ *                  route distance a car is kept at (sub_0003DCB0/0003D940
+ *                  place, sub_000192D0/00020A20 keep/count)
+ *   0x34036C  500  farthest a spawn candidate may be from the player
+ *                  (sub_0003DCB0; sub_000396D0's roaming racers)
+ *   0x3408F8  250  the other recycle test (sub_00019240 by route,
+ *                  sub_00019280 straight line without a road net). Shared
+ *                  with unrelated arithmetic (sub_0007D910, sub_0017C980),
+ *                  so it is raised only while those two run (wrappers).
+ *   0x35EBB4  80/40/20  car LOD steps in projected pixels (sub_00204D60):
+ *                  divided by k, each LOD lasts k times further
+ *   sub_001C6900   scenery size in pixels for sub_001C69C0's culling (17 px)
+ *                  and LOD choice: multiplied by k (native path only, not
+ *                  under RECOMP_NATIVE=0 or RECOMP_NATIVE_CHECK=1).
+ * The world itself comes from a precomputed visibility grid (no constant),
+ * and the camera's far plane is already 10 km. The car pool is fixed, so
+ * traffic gets sparser as k grows. */
+static float s_draw_k = 1.0f;
+
+static void patch_float(uint32_t va, float was, float now)
+{
+    if (MEMF(va) == was)
+        MEMF(va) = now;
+    else
+        fprintf(stderr, "[draw] 0x%06X is %g, not %g: left alone\n", va, MEMF(va), was);
+}
+
+void nfsu2_draw_distance_init(float k)
+{
+    if (!(k > 1.0f) || k > 4.0f) {
+        if (k != 1.0f)
+            fprintf(stderr, "[draw] NFSU2_DRAW_DISTANCE %g ignored (1..4)\n", k);
+        return;
+    }
+    s_draw_k = k;
+    patch_float(0x38D060, 250.0f, 250.0f * k);
+    patch_float(0x34036C, 500.0f, 500.0f * k);
+    patch_float(0x35EBB4, 80.0f, 80.0f / k);
+    patch_float(0x35EBB8, 40.0f, 40.0f / k);
+    patch_float(0x35EBBC, 20.0f, 20.0f / k);
+    printf("[draw] distance x%.2f: traffic %.0f m (spawn search %.0f m), car LOD steps "
+           "%.1f/%.1f/%.1f px, scenery x%.2f\n", k, MEMF(0x38D060), MEMF(0x34036C),
+           MEMF(0x35EBB4), MEMF(0x35EBB8), MEMF(0x35EBBC), k);
+}
+
+extern void sub_00019240_gen(void);
+extern void sub_00019280_gen(void);
+
+static void with_traffic_radius(void (*fn)(void))
+{
+    float was;
+    if (s_draw_k == 1.0f) {
+        fn();
+        return;
+    }
+    was = MEMF(0x3408F8);
+    MEMF(0x3408F8) = 250.0f * s_draw_k;
+    fn();
+    MEMF(0x3408F8) = was;
+}
+
+void sub_00019240(void) { with_traffic_radius(sub_00019240_gen); }
+void sub_00019280(void) { with_traffic_radius(sub_00019280_gen); }
+
 /* sub_001C6900: cdecl (obj, const float p[3], float r) -> int. d = p - c
  * (c at obj+0x60); if d.n (n at obj+0x70) < -r: 0. Otherwise L = |d| - r
  * (as a float) and v = L > r ? A / L * r : A (A at obj+0x80), truncated
@@ -981,6 +1049,8 @@ void sub_001C6900(void)
     memcpy(&r, &rv, 4);
     x0 = g_xmm0;
     if (sphere_fade(obj, p, r, &cmp, &cc, &v, &l) == 0) {
+        if (mode == 1)
+            v *= s_draw_k;                  /* draw distance (see above) */
         res = (uint32_t)(int32_t)v;
         x0.f[0] = v;
         x0.f[1] = l;

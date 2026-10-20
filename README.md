@@ -107,6 +107,20 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 
 </details>
 
+<details open>
+<summary><b>2c. Steam Deck</b> (Docker + Valve's Steam Runtime 3 SDK)</summary>
+
+```sh
+NFSU2_GEN_DIR=/path/to/gen deck/build.sh     # -> deck_out/nfsu2x-deck-<version>.tar.gz
+```
+
+Copy `nfsu2x/` to the Deck, put the extracted disc in `nfsu2x/game/` and
+add `nfsu2x.sh` to Steam as a non-Steam game (see `deck/README.txt`).
+Vulkan (RADV), fullscreen, Steam Input controls and rumble; CPU/GPU clocks
+stay with Steam's Performance settings and are logged, not changed.
+
+</details>
+
 ### Project layout
 
 | Path | What |
@@ -118,6 +132,7 @@ VULKAN=1 JOBS=6 NFSU2_GEN_DIR=/path/to/gen switch/build.sh
 | `xboxrecomp/` | the toolkit (MIT), vendored with this port's changes: NV2A renderers (Vulkan, OpenGL), SDL audio, Switch platform layer, translator fixes |
 | `tools/regen.sh` | XBE → lifted C (`gen/`, never committed) |
 | `switch/build.sh` | Switch NRO build + SD-card staging |
+| `deck/build.sh`, `src/steamdeck.c` | Steam Deck build (Steam Runtime container), launcher, Deck detection and clock log |
 
 ## ⚙️ Configuration
 

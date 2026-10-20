@@ -1,0 +1,11 @@
+# Runtime switches, KEY=VALUE, one per line; '#' starts a comment.
+# Steam launch options (KEY=VALUE %command%) override these.
+#
+# RECOMP_FULLSCREEN=0        windowed in Desktop Mode (F11 / Alt+Enter toggle)
+# RECOMP_WIDESCREEN=0        4:3 instead of the game's 16:9 mode
+# NFSU2_FPS_CAP=30           the game's own 30 fps cap in races
+# RECOMP_RUMBLE=0            no vibration (or Options -> Gameplay -> Vibration)
+# RECOMP_GL_SCALE=2          render scale until changed in Options -> Video
+# NFSU2_DECK_TEXT=0          keep "Black" in the replay legend (RB on the Deck)
+# NFSU2_CLOCK_LOG=0          no [clock] lines in nfsu2x_log.txt
+# RECOMP_AUDIO_VOLUME=80     0..100

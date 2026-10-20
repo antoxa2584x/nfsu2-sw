@@ -34,6 +34,7 @@ void switch_error_dialog(const char *msg, const char *details);
 #elif !defined(_WIN32)
 int SDL_ShowSimpleMessageBox(uint32_t flags, const char *title, const char *message,
                              void *window);
+void nfsu2_deck_boot(void);         /* steamdeck.c: Steam Deck defaults, clocks */
 #endif
 
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
@@ -321,6 +322,10 @@ static int game_main(void)
     setenv("RECOMP_USB", "1", 0);       /* the pad is on the MCPX's OHCI */
     setenv("RECOMP_PB_EXEC", "1", 0);   /* the title draws through NV2A */
 #endif
+#if !defined(_WIN32) && !defined(__SWITCH__)
+    setenv("RECOMP_WINDOW_TITLE", "Need for Speed Underground 2", 0);
+    nfsu2_deck_boot();
+#endif
 #if defined(__SWITCH__)
     /* Every periodic log line flushes to the SD card; keep the log to what
      * matters on a console. RECOMP_QUIET=0 in nfsu2x_env.txt brings it back. */
@@ -367,6 +372,23 @@ static int game_main(void)
                 printf("[BOOT] game time cap %.0f ms per frame\n", steps * 1000.0f / 60.0f);
             }
         }
+    }
+
+    /* Draw distance (recomp_manual.c): traffic, car and scenery detail k
+     * times further. NFSU2_DRAW_DISTANCE=<k> (1..4); default 1.6 on a Steam
+     * Deck, 1 (the Xbox's) elsewhere. */
+    {
+        extern void nfsu2_draw_distance_init(float k);
+        const char *e = getenv("NFSU2_DRAW_DISTANCE");
+        float k = 1.0f;
+#if !defined(_WIN32) && !defined(__SWITCH__)
+        extern int nfsu2_is_steam_deck(void);
+        if (nfsu2_is_steam_deck())
+            k = 1.6f;
+#endif
+        if (e && *e)
+            k = (float)atof(e);
+        nfsu2_draw_distance_init(k);
     }
 
     /* The emulated APU. DirectSound's accesses reach it through the MMIO

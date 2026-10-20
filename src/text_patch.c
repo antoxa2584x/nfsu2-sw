@@ -61,6 +61,13 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
 };
 
 static int s_switch_words;
+static int s_deck_words;     /* steamdeck.c: Steam Deck (Xbox-layout pad) */
+
+/* The Deck pad has the Xbox labels; only the Xbox-only buttons change
+ * (xinput_device.c: White = LB, Black = RB). */
+static const struct { uint32_t hash; const char *text; } s_deck_by_hash[] = {
+    { 0xC5146FE8u, "RB" },                       /* UI_REPLAY_SELECT_XBOX "Black" */
+};
 
 /* Whole strings, by label hash. */
 static const struct { uint32_t hash; const char *text; } s_by_hash[] = {
@@ -110,6 +117,9 @@ static int rewrite(uint32_t hash, const char *src, char *dst, size_t cap, int en
     size_t n = 0, i;
     for (i = 0; i < sizeof s_always / sizeof s_always[0]; i++)
         if (s_always[i].hash == hash) { src = s_always[i].text; goto copy; }
+    if (s_deck_words && english)
+        for (i = 0; i < sizeof s_deck_by_hash / sizeof s_deck_by_hash[0]; i++)
+            if (s_deck_by_hash[i].hash == hash) { src = s_deck_by_hash[i].text; goto copy; }
     if (!s_switch_words || !english)
         goto copy;
     for (i = 0; i < sizeof s_by_hash / sizeof s_by_hash[0]; i++)
@@ -187,7 +197,9 @@ static void patch_chunk(uint8_t *c, size_t avail)
     for (k = 0; k < count; k++)
         wr32(t + 8 * k + 4, noff[k]);
     printf("[TEXT] %s: %d of %u strings changed\n",
-           english && s_switch_words ? "Switch wording" : "option labels", changed, count);
+           english && s_switch_words ? "Switch wording"
+           : english && s_deck_words ? "Steam Deck wording" : "option labels",
+           changed, count);
     free(out); free(noff);
     return;
 fail:
@@ -216,5 +228,7 @@ void nfsu2_text_patch_init(void)
     int on = e && e[0] == '1';
 #endif
     s_switch_words = on;
+    e = getenv("NFSU2_DECK_TEXT");
+    s_deck_words = !on && e && e[0] == '1';
     xbox_file_read_hook = on_read;
 }

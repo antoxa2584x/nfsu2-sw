@@ -45,6 +45,7 @@ set(GAME_SOURCES
     src/switch_nx.c
     src/switch_saltynx.c
     src/text_patch.c
+    src/steamdeck.c
     src/movie_crop.c
 src/nic.c
 )
