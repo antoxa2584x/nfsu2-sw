@@ -63,3 +63,36 @@ gen/
 
 # Per-game toolkit output (disassembly of the retail XBE)
 xboxrecomp/tools/*/output/
+
+/build-eu/
+/tests/switch_heap/results.json
+/tests/switch_heap/test_switch_heap
+
+# Repository publication boundary: local work and credentials must stay local.
+# This does not remove tracked files or cleanse Git history.
+/internal/
+/private/
+/secrets/
+/credentials/
+/working-notes/
+/incident-notes/
+/local-notes/
+/private-inputs/
+/private-output/
+/local-tests/
+/verification-private/
+**/.env
+**/.env.*
+!**/.env.example
+**/*.p12
+**/*.pfx
+**/*.pem
+!**/*.pub.pem
+**/*.key
+**/*.token
+**/*.secret
+**/id_rsa
+**/id_ed25519
+**/*credentials*.json
+**/*private*.log
+**/*.dmp

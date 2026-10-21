@@ -944,6 +944,7 @@ extern ULONG            xbox_HalBootSMCVideoMode;
 extern PVOID            xbox_IdexChannelObject;
 
 /* EEPROM / Non-Volatile Settings */
+void xbox_SetConsoleLanguage(ULONG language);
 NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength);
 NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(ULONG ValueIndex, ULONG Type, PVOID Value, ULONG ValueLength);
 

@@ -1,0 +1,10 @@
+#ifndef NFSU2_VIDEO_RECOMMENDATION_H
+#define NFSU2_VIDEO_RECOMMENDATION_H
+
+/* Port-owned caption labels, inserted only into EU language tables. */
+#define NFSU2_VIDEO_RECOMMENDED_TITLE 0x4E465331u
+#define NFSU2_VIDEO_WARNING_TITLE     0x4E465332u
+#define NFSU2_VIDEO_RECOMMENDED_HELP  0xC097DD69u
+#define NFSU2_VIDEO_WARNING_HELP      0xEAC5EE5Bu
+
+#endif

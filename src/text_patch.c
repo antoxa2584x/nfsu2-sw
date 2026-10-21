@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "video_recommendation.h"
 
 /* kernel_file.c */
 extern void (*xbox_file_read_hook)(void *buf, size_t len, int64_t offset);
@@ -36,6 +37,7 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
     /* Options -> Video rows */
     { 0x8FE9288Eu, "Car Reflections" },          /* "Car Reflection Detail" */
     { 0x4AC50BCFu, "Resolution Scale" },         /* "Car Geometry Detail" */
+    { 0xA9A76BBAu, "FPS Display" },              /* PC-only "Resolution" */
     { 0x2A2A4AB3u, "1x" },                       /* "Road Reflection Detail" */
     { 0x822E4E9Bu, "1.5x" },                     /* "Motion Blur" */
     { 0xB55E7665u, "2x" },                       /* "Level Of Detail" */
@@ -61,6 +63,13 @@ static const struct { uint32_t hash; const char *text; } s_always[] = {
 };
 
 static int s_switch_words;
+#if defined(NFSU2_BUILD_EU)
+extern int nfsu2_text_language_is_german(void);
+static const struct { uint32_t hash; const char *english, *german; } s_eu_extra[] = {
+    { NFSU2_VIDEO_RECOMMENDED_TITLE, "Video: 1.5x recommended", "Video: 1,5x empfohlen" },
+    { NFSU2_VIDEO_WARNING_TITLE, "Video: possible FPS drops", "Video: FPS-Einbruch m\xF6glich" },
+};
+#endif
 
 /* Whole strings, by label hash. */
 static const struct { uint32_t hash; const char *text; } s_by_hash[] = {
@@ -108,6 +117,34 @@ static const struct { const char *from, *to; } s_rules[] = {
 static int rewrite(uint32_t hash, const char *src, char *dst, size_t cap, int english)
 {
     size_t n = 0, i;
+#if defined(NFSU2_BUILD_EU)
+    for (i = 0; i < sizeof s_eu_extra / sizeof s_eu_extra[0]; ++i)
+        if (hash == s_eu_extra[i].hash) {
+            src = !english && nfsu2_text_language_is_german() ? s_eu_extra[i].german : s_eu_extra[i].english;
+            goto copy;
+        }
+    if (hash == NFSU2_VIDEO_RECOMMENDED_HELP) {
+        src = !english && nfsu2_text_language_is_german()
+            ? "Empfehlung: 1,5x, Reflexionen an. Kantengl\xE4ttung, Texturfilter und quadratische Pixel aus. Stabile 30 FPS sind nicht garantiert."
+            : "Recommended: 1.5x, reflections on. Anti-aliasing, texture filter and square pixels off. A stable 30 FPS is not guaranteed.";
+        goto copy;
+    }
+    if (hash == NFSU2_VIDEO_WARNING_HELP) {
+        src = !english && nfsu2_text_language_is_german()
+            ? "H\xF6here Grafik-Einstellungen k\xF6nnen Ruckler verursachen. Empfehlung: 1,5x und Reflexionen an; Zusatzoptionen aus."
+            : "Higher graphics settings can cause FPS drops and stutter. Recommended: 1.5x, reflections on, extra picture options off.";
+        goto copy;
+    }
+    if (!english && nfsu2_text_language_is_german()) {
+        if (hash == 0x8FE9288Eu) { src = "Reflexionen"; goto copy; }
+        /* The retail font uses a single byte, not UTF-8, for umlauts. */
+        if (hash == 0x4AC50BCFu) { src = "Aufl\xF6sung"; goto copy; }
+        if (hash == 0xA9A76BBAu) { src = "FPS-Anzeige"; goto copy; }
+        if (hash == 0x4CD775ACu) { src = "Kantengl\xE4ttung"; goto copy; }
+        if (hash == 0x4E57D355u) { src = "Texturfilter"; goto copy; }
+        if (hash == 0xA9C27DFDu) { src = "Quadratische Pixel"; goto copy; }
+    }
+#endif
     for (i = 0; i < sizeof s_always / sizeof s_always[0]; i++)
         if (s_always[i].hash == hash) { src = s_always[i].text; goto copy; }
     if (!s_switch_words || !english)
@@ -140,6 +177,11 @@ copy:
 
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 static void wr32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static int label_compare(const void *a, const void *b)
+{
+    uint32_t x = rd32(a), y = rd32(b);
+    return (x > y) - (x < y);
+}
 
 /* One language chunk at c, avail bytes of it in the buffer. */
 static void patch_chunk(uint8_t *c, size_t avail)
@@ -158,41 +200,75 @@ static void patch_chunk(uint8_t *c, size_t avail)
     uint8_t *t = base + tab;
     char *p = (char *)base + pool;
     size_t plen = size - pool;
-    uint32_t k;
+    uint32_t k, i;
     int english = 0;
 
     for (k = 0; k < count; k++)
         if (rd32(t + 8 * k) == HASH_ENGLISH) {
             uint32_t o = rd32(t + 8 * k + 4);
-            english = o < plen && strncmp(p + o, TEXT_ENGLISH, plen - o) == 0;
+            english = o < plen && (strncmp(p + o, TEXT_ENGLISH, plen - o) == 0 ||
+                                  strncmp(p + o, "Please press + to begin", plen - o) == 0);
             break;
         }
 
-    char *out = malloc(plen);
-    uint32_t *noff = malloc(count * sizeof *noff);
-    if (!out || !noff) { free(out); free(noff); return; }
+    uint32_t extra = 0;
+#if defined(NFSU2_BUILD_EU)
+    int present[sizeof s_eu_extra / sizeof s_eu_extra[0]] = {0};
+    for (i = 0; i < sizeof s_eu_extra / sizeof s_eu_extra[0]; ++i) {
+        for (k = 0; k < count; ++k)
+            if (rd32(t + 8 * k) == s_eu_extra[i].hash) { present[i] = 1; break; }
+        if (!present[i]) ++extra;
+    }
+#endif
+    if (count + extra > 65536 || extra * 8u >= plen)
+        return;
+    uint32_t new_pool = pool + extra * 8u;
+    size_t capacity = size - new_pool;
+    char *out = malloc(capacity);
+    uint8_t *rows = malloc((count + extra) * 8u);
+    if (!out || !rows) { free(out); free(rows); return; }
     size_t used = 0;
     int changed = 0;
     for (k = 0; k < count; k++) {
         uint32_t o = rd32(t + 8 * k + 4);
         if (o >= plen || !memchr(p + o, 0, plen - o)) goto fail;
-        int n = rewrite(rd32(t + 8 * k), p + o, out + used, plen - used, english);
+        wr32(rows + 8 * k, rd32(t + 8 * k));
+        wr32(rows + 8 * k + 4, o);
+    }
+    uint32_t new_count = count;
+#if defined(NFSU2_BUILD_EU)
+    for (i = 0; i < sizeof s_eu_extra / sizeof s_eu_extra[0]; ++i) {
+        if (present[i]) continue;
+        wr32(rows + 8 * new_count, s_eu_extra[i].hash);
+        wr32(rows + 8 * new_count + 4, UINT32_MAX);
+        ++new_count;
+    }
+#endif
+    /* Add the port's captions inside the existing chunk allocation. Build
+     * both table and pool first; malformed input/overflow changes no bytes. */
+    if (extra)
+        qsort(rows, new_count, 8, label_compare);
+    for (k = 0; k < new_count; ++k) {
+        uint32_t o = rd32(rows + 8 * k + 4);
+        const char *original = o == UINT32_MAX ? "" : p + o;
+        int n = rewrite(rd32(rows + 8 * k), original, out + used, capacity - used, english);
         if (n < 0) goto fail;
-        if (strcmp(out + used, p + o) != 0) changed++;
-        noff[k] = (uint32_t)used;
+        if (strcmp(out + used, original) != 0) changed++;
+        wr32(rows + 8 * k + 4, (uint32_t)used);
         used += (size_t)n + 1;
     }
-    memcpy(p, out, used);
-    memset(p + used, 0, plen - used);
-    for (k = 0; k < count; k++)
-        wr32(t + 8 * k + 4, noff[k]);
+    memcpy(base + new_pool, out, used);
+    memset(base + new_pool + used, 0, capacity - used);
+    memcpy(t, rows, new_count * 8u);
+    wr32(base + 4, new_count);
+    wr32(base + 12, new_pool);
     printf("[TEXT] %s: %d of %u strings changed\n",
-           english && s_switch_words ? "Switch wording" : "option labels", changed, count);
-    free(out); free(noff);
+           english && s_switch_words ? "Switch wording" : "option labels", changed, new_count);
+    free(out); free(rows);
     return;
 fail:
     fprintf(stderr, "[TEXT] language chunk not patched (pool overflow or bad offset)\n");
-    free(out); free(noff);
+    free(out); free(rows);
 }
 
 static void on_read(void *buf, size_t len, int64_t offset)

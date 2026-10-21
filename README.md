@@ -4,7 +4,7 @@
 
 ### Xbox static recompilation for Nintendo Switch and Linux
 
-The original Xbox (NTSC-U) release of **Need for Speed: Underground 2**, lifted
+The original Xbox (NTSC-U and PAL-EU) releases of **Need for Speed: Underground 2**, lifted
 instruction by instruction to C and running natively, with no emulator.
 
 ![Switch](https://img.shields.io/badge/Nintendo%20Switch-homebrew-E60012?logo=nintendoswitch&logoColor=white)
@@ -23,6 +23,18 @@ instruction by instruction to C and running natively, with no emulator.
 > **No game data is included.** You need your own copy of the Xbox disc,
 > extracted (`default.xbe`, `NFSUNDER/`, ...).
 
+**Disc regions:** The shared source tree builds NTSC-U (default) or PAL-EU
+with `NFSU2_REGION=EU`. Each NRO contains one region's translation and needs
+the matching extracted disc; ISO files are not loaded directly. Startup
+detects mismatched game files before running the guest. See
+[PAL-EU setup and validation](pal/README.md). The game retains its normal
+language chooser.
+
+For EU Vulkan, start with **1.5x resolution, reflections On, anti-aliasing,
+texture filter and square pixels Off**. Video settings are also available
+from the pause menu. Higher-cost settings show a performance notice;
+stable 30 FPS is not guaranteed. See the [EU settings guide](pal/README.md#performance-baseline).
+
 ## ✨ Features
 
 - 🏁 **Native code**: the whole game runs as recompiled C, built with
@@ -35,6 +47,8 @@ instruction by instruction to C and running natively, with no emulator.
   passes the game draws every race frame
 - 🔍 **Resolution Scale** in **Options → Video** (Vulkan): 1x, 1.5x
   (default), 2x, 2.5x, applied at once
+- **FPS Display** in **Options → Video** (Vulkan): an optional on-screen
+  counter, switched immediately and saved with the other port options
 - 🖼️ **Cleaner picture** (Vulkan): mipmaps with trilinear and anisotropic
   filtering, mipmapped car reflections, FXAA, square pixels in 16:9 races
   (1280x720 at 1.5x); **Anti-Aliasing**, **Anisotropic** (Off-16x) and
@@ -315,12 +329,6 @@ RECOMP_WIDESCREEN=0
 
 Still open: cube maps on OpenGL (Vulkan has them: car reflections), bump/dot-product texture modes, fixed-function
 lighting.
-
-## 📚 More
-
-- [`CLAUDE.md`](CLAUDE.md): detailed engineering notes
-- [`PERF_NOTES.md`](PERF_NOTES.md): performance work and measurements
-- [`VULKAN_NOTES.md`](VULKAN_NOTES.md): the Vulkan renderer
 
 <div align="center">
 <sub>Need for Speed and Underground are trademarks of Electronic Arts. This is

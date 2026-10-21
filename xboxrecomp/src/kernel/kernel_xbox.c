@@ -136,6 +136,14 @@ int xbox_video_widescreen(void)
     return ws;
 }
 
+/* Host console locale, supplied before guest threads start. This exposes
+ * the EEPROM language; it never selects a game menu row or skips its chooser. */
+static ULONG s_console_language = 1;
+void xbox_SetConsoleLanguage(ULONG language)
+{
+    s_console_language = language >= 1 && language <= 9 ? language : 1;
+}
+
 NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
     ULONG ValueIndex, PULONG Type, PVOID Value, ULONG ValueLength, PULONG ResultLength)
 {
@@ -147,9 +155,9 @@ NTSTATUS __stdcall xbox_ExQueryNonVolatileSetting(
 
     switch (ValueIndex) {
     case XC_LANGUAGE:
-        /* English = 1 */
+        /* Original Xbox EEPROM IDs; English remains the host fallback. */
         if (ValueLength >= sizeof(ULONG)) {
-            *(PULONG)Value = 1;
+            *(PULONG)Value = s_console_language;
             if (Type) *Type = 4; /* REG_DWORD */
             if (ResultLength) *ResultLength = sizeof(ULONG);
         }

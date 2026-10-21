@@ -318,7 +318,9 @@ static CRITICAL_SECTION* xbox_cs_shadow(PRTL_CRITICAL_SECTION guest)
  * pointer does not. */
 extern ptrdiff_t g_xbox_mem_offset;
 
+#ifndef NFSU2_PACKED_REGISTERS
 extern RECOMP_TLS uint32_t g_esp;
+#endif
 extern uint32_t g_xbox_code_lo, g_xbox_code_hi;
 
 /* A guest backtrace, printed where the guest is standing.
